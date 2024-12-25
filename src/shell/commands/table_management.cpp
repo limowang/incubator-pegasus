@@ -1014,6 +1014,9 @@ bool get_max_replica_count(command_executor *e, shell_context *sc, arguments arg
 
 bool set_max_replica_count(command_executor *e, shell_context *sc, arguments args)
 {
+    static struct option long_options[] = {{"auto_yes", no_argument, 0, 'y'},
+                                           {0, 0, 0, 0}};
+
     if (args.argc < 3) {
         return false;
     }
@@ -1031,10 +1034,31 @@ bool set_max_replica_count(command_executor *e, shell_context *sc, arguments arg
 
     std::string app_name(args.argv[1]);
     std::string escaped_app_name(pegasus::utils::c_escape_string(app_name));
-    std::string action(fmt::format(
+
+    bool auto_yes = false;
+    optind = 0;
+    while (true) {
+        int option_index = 0;
+        int c = getopt_long(args.argc, args.argv, ":y", long_options, &option_index);
+        if (c == -1) {
+            break;
+        }
+
+        switch (c) {
+        case 'y':
+            auto_yes = true;
+            break;
+        default:
+            return false;
+        }
+    }
+
+    if(!auto_yes) {
+        std::string action(fmt::format(
         "set the replica count of app({}) to {}", escaped_app_name, new_max_replica_count));
-    if (!confirm_unsafe_command(action)) {
-        return true;
+        if (!confirm_unsafe_command(action)) {
+            return true;
+        }
     }
 
     auto err_resp = sc->ddl_client->set_max_replica_count(app_name, new_max_replica_count);

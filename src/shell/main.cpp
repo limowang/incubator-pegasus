@@ -609,7 +609,8 @@ static command_executor commands[] = {
     {
         "set_replica_count",
         "set the max replica count of an app",
-        "<app_name> <replica_count>",
+        "<app_name> <replica_count> "
+        "[-y|--auto_yes]",
         set_max_replica_count,
     },
     {
