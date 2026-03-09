@@ -80,6 +80,11 @@ METRIC_DEFINE_counter(server,
                      dsn::metric_unit::kEvictions,
                      "The number of DNS cache entries evicted due to cache size limit");
 
+METRIC_DEFINE_counter(server,
+                     dns_resolver_cache_expired,
+                     dsn::metric_unit::kEntries,
+                     "The number of DNS cache entries that expired due to TTL");
+
 namespace dsn {
 
 DSN_DEFINE_int32(network,
@@ -99,6 +104,12 @@ DSN_DEFINE_int32(network,
                  "Maximum number of entries in DNS resolver cache. When cache is full, "
                  "least recently used entries are evicted. Set to 0 for unlimited cache.");
 
+DSN_DEFINE_int64(network,
+                 dns_resolver_cache_ttl_seconds,
+                 3600,
+                 "Time-to-live (TTL) for DNS cache entries in seconds. Entries older than "
+                 "this are considered expired and will be re-resolved. Set to 0 for no expiration.");
+
 dns_resolver::dns_resolver()
     : METRIC_VAR_INIT_server(dns_resolver_cache_size),
       METRIC_VAR_INIT_server(dns_resolver_resolve_duration_ns),
@@ -107,7 +118,8 @@ dns_resolver::dns_resolver()
       METRIC_VAR_INIT_server(dns_resolver_resolve_failure),
       METRIC_VAR_INIT_server(dns_resolver_cache_hit),
       METRIC_VAR_INIT_server(dns_resolver_cache_miss),
-      METRIC_VAR_INIT_server(dns_resolver_cache_eviction)
+      METRIC_VAR_INIT_server(dns_resolver_cache_eviction),
+      METRIC_VAR_INIT_server(dns_resolver_cache_expired)
 {
 #ifndef MOCK_TEST
     static int only_one_instance = 0;
@@ -122,6 +134,26 @@ bool dns_resolver::get_cached_addresses(const host_port &hp, std::vector<rpc_add
     const auto &found = _dns_cache.find(hp);
     if (found == _dns_cache.end()) {
         return false;
+    }
+
+    // Check if entry has expired
+    if (is_entry_expired(found->second)) {
+        // Entry expired, need to re-resolve
+        l.unlock();
+        {
+            utils::auto_write_lock wl(_lock);
+            // Double-check expiration after acquiring write lock
+            const auto it = _dns_cache.find(hp);
+            if (it != _dns_cache.end() && is_entry_expired(it->second)) {
+                LOG_DEBUG("DNS cache entry expired for '{}', removing from cache", hp);
+                _dns_cache.erase(it);
+                METRIC_VAR_DECREMENT(dns_resolver_cache_size);
+                METRIC_VAR_INCREMENT(dns_resolver_cache_expired);
+                return false; // Cache miss, will trigger re-resolution
+            }
+        }
+        // Entry was refreshed by another thread, retry lookup
+        return get_cached_addresses(hp, addresses);
     }
 
     // Update access time for LRU (need write lock for this)
@@ -170,6 +202,12 @@ void dns_resolver::evict_lru_if_needed()
         METRIC_VAR_INCREMENT(dns_resolver_cache_eviction);
         METRIC_VAR_DECREMENT(dns_resolver_cache_size);
     }
+}
+
+bool dns_resolver::is_entry_expired(const cache_entry &entry) const
+{
+    uint64_t ttl_ns = static_cast<uint64_t>(FLAGS_dns_resolver_cache_ttl_seconds) * 1000000000ULL;
+    return entry.is_expired(ttl_ns);
 }
 
 error_s dns_resolver::resolve_addresses(const host_port &hp, std::vector<rpc_address> &addresses)

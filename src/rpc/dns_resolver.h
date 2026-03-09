@@ -64,23 +64,34 @@ private:
 
     error_s resolve_addresses(const host_port &hp, std::vector<rpc_address> &addresses);
 
-    // Cache entry with timestamp for LRU eviction
+    // Cache entry with timestamp for LRU eviction and TTL expiration
     struct cache_entry
     {
         rpc_address address;
         uint64_t last_access_time;
+        uint64_t creation_time;
 
-        cache_entry() : last_access_time(0) {}
+        cache_entry() : last_access_time(0), creation_time(0) {}
 
-        explicit cache_entry(rpc_address addr) : address(std::move(addr)), last_access_time(0)
+        explicit cache_entry(rpc_address addr) : address(std::move(addr)), last_access_time(0), creation_time(0)
         {
             update_access_time();
+            creation_time = last_access_time;
         }
 
         void update_access_time() { last_access_time = dsn_now_ns(); }
+
+        bool is_expired(uint64_t ttl_ns) const
+        {
+            if (ttl_ns == 0) {
+                return false; // TTL of 0 means no expiration
+            }
+            return (dsn_now_ns() - creation_time) > ttl_ns;
+        }
     };
 
     void evict_lru_if_needed();
+    bool is_entry_expired(const cache_entry &entry) const;
 
     mutable utils::rw_lock_nr _lock;
     // Cache the host_port resolve results, the cached rpc_address is the first one in the resolved
@@ -95,6 +106,7 @@ private:
     METRIC_VAR_DECLARE_counter(dns_resolver_cache_hit);
     METRIC_VAR_DECLARE_counter(dns_resolver_cache_miss);
     METRIC_VAR_DECLARE_counter(dns_resolver_cache_eviction);
+    METRIC_VAR_DECLARE_counter(dns_resolver_cache_expired);
 
     DISALLOW_COPY_AND_ASSIGN(dns_resolver);
     DISALLOW_MOVE_AND_ASSIGN(dns_resolver);
