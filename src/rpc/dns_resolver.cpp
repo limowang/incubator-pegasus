@@ -75,6 +75,11 @@ METRIC_DEFINE_counter(server,
                      dsn::metric_unit::kResolves,
                      "The number of DNS resolution retry attempts");
 
+METRIC_DEFINE_counter(server,
+                     dns_resolver_cache_eviction,
+                     dsn::metric_unit::kEvictions,
+                     "The number of DNS cache entries evicted due to cache size limit");
+
 namespace dsn {
 
 DSN_DEFINE_int32(network,
@@ -88,6 +93,12 @@ DSN_DEFINE_int32(network,
                  "Initial delay in milliseconds between DNS resolution retry attempts "
                  "(doubles after each retry up to max 5000ms)");
 
+DSN_DEFINE_int32(network,
+                 dns_resolver_cache_max_size,
+                 1000,
+                 "Maximum number of entries in DNS resolver cache. When cache is full, "
+                 "least recently used entries are evicted. Set to 0 for unlimited cache.");
+
 dns_resolver::dns_resolver()
     : METRIC_VAR_INIT_server(dns_resolver_cache_size),
       METRIC_VAR_INIT_server(dns_resolver_resolve_duration_ns),
@@ -95,7 +106,8 @@ dns_resolver::dns_resolver()
       METRIC_VAR_INIT_server(dns_resolver_resolve_success),
       METRIC_VAR_INIT_server(dns_resolver_resolve_failure),
       METRIC_VAR_INIT_server(dns_resolver_cache_hit),
-      METRIC_VAR_INIT_server(dns_resolver_cache_miss)
+      METRIC_VAR_INIT_server(dns_resolver_cache_miss),
+      METRIC_VAR_INIT_server(dns_resolver_cache_eviction)
 {
 #ifndef MOCK_TEST
     static int only_one_instance = 0;
@@ -112,9 +124,52 @@ bool dns_resolver::get_cached_addresses(const host_port &hp, std::vector<rpc_add
         return false;
     }
 
-    addresses = {found->second};
+    // Update access time for LRU (need write lock for this)
+    l.unlock();
+    {
+        utils::auto_write_lock wl(_lock);
+        const auto it = _dns_cache.find(hp);
+        if (it != _dns_cache.end()) {
+            it->second.update_access_time();
+        }
+    }
+
+    addresses = {found->second.address};
     METRIC_VAR_INCREMENT(dns_resolver_cache_hit);
     return true;
+}
+
+void dns_resolver::evict_lru_if_needed()
+{
+    // Check if cache size limit is enabled and exceeded
+    if (FLAGS_dns_resolver_cache_max_size <= 0) {
+        return; // Unlimited cache
+    }
+
+    if (_dns_cache.size() <= static_cast<size_t>(FLAGS_dns_resolver_cache_max_size)) {
+        return; // Cache not full yet
+    }
+
+    // Find and evict the least recently used entry
+    auto lru_it = _dns_cache.end();
+    uint64_t oldest_time = UINT64_MAX;
+
+    for (auto it = _dns_cache.begin(); it != _dns_cache.end(); ++it) {
+        if (it->second.last_access_time < oldest_time) {
+            oldest_time = it->second.last_access_time;
+            lru_it = it;
+        }
+    }
+
+    if (lru_it != _dns_cache.end()) {
+        LOG_INFO("DNS cache full (size={}, max={}), evicting LRU entry: {}",
+                 _dns_cache.size(),
+                 FLAGS_dns_resolver_cache_max_size,
+                 lru_it->first);
+        _dns_cache.erase(lru_it);
+        METRIC_VAR_INCREMENT(dns_resolver_cache_eviction);
+        METRIC_VAR_DECREMENT(dns_resolver_cache_size);
+    }
 }
 
 error_s dns_resolver::resolve_addresses(const host_port &hp, std::vector<rpc_address> &addresses)
@@ -152,9 +207,19 @@ error_s dns_resolver::resolve_addresses(const host_port &hp, std::vector<rpc_add
                 }
 
                 utils::auto_write_lock l(_lock);
-                const auto it = _dns_cache.insert(std::make_pair(hp, resolved_addresses[0]));
+
+                // Evict LRU entry if cache is full before inserting new entry
+                evict_lru_if_needed();
+
+                // Insert new cache entry
+                const auto it = _dns_cache.insert(std::make_pair(hp, cache_entry(resolved_addresses[0])));
                 if (it.second) {
                     METRIC_VAR_INCREMENT(dns_resolver_cache_size);
+                } else {
+                    // Entry already existed (shouldn't happen due to cache miss check above),
+                    // but update it anyway
+                    it->second.address = resolved_addresses[0];
+                    it->second.update_access_time();
                 }
             }
 

@@ -64,10 +64,28 @@ private:
 
     error_s resolve_addresses(const host_port &hp, std::vector<rpc_address> &addresses);
 
+    // Cache entry with timestamp for LRU eviction
+    struct cache_entry
+    {
+        rpc_address address;
+        uint64_t last_access_time;
+
+        cache_entry() : last_access_time(0) {}
+
+        explicit cache_entry(rpc_address addr) : address(std::move(addr)), last_access_time(0)
+        {
+            update_access_time();
+        }
+
+        void update_access_time() { last_access_time = dsn_now_ns(); }
+    };
+
+    void evict_lru_if_needed();
+
     mutable utils::rw_lock_nr _lock;
     // Cache the host_port resolve results, the cached rpc_address is the first one in the resolved
     // list.
-    std::unordered_map<host_port, rpc_address> _dns_cache;
+    std::unordered_map<host_port, cache_entry> _dns_cache;
 
     METRIC_VAR_DECLARE_gauge_int64(dns_resolver_cache_size);
     METRIC_VAR_DECLARE_percentile_int64(dns_resolver_resolve_duration_ns);
@@ -76,6 +94,7 @@ private:
     METRIC_VAR_DECLARE_counter(dns_resolver_resolve_failure);
     METRIC_VAR_DECLARE_counter(dns_resolver_cache_hit);
     METRIC_VAR_DECLARE_counter(dns_resolver_cache_miss);
+    METRIC_VAR_DECLARE_counter(dns_resolver_cache_eviction);
 
     DISALLOW_COPY_AND_ASSIGN(dns_resolver);
     DISALLOW_MOVE_AND_ASSIGN(dns_resolver);
