@@ -18,9 +18,11 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <set>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 #include "fmt/core.h"
@@ -68,7 +70,23 @@ METRIC_DEFINE_counter(server,
                      dsn::metric_unit::kResolves,
                      "The number of host_port resolutions that required DNS lookup");
 
+METRIC_DEFINE_counter(server,
+                     dns_resolver_resolve_retry,
+                     dsn::metric_unit::kResolves,
+                     "The number of DNS resolution retry attempts");
+
 namespace dsn {
+
+DSN_DEFINE_int32(network,
+                 dns_resolver_retry_max_count,
+                 3,
+                 "Maximum number of retry attempts for DNS resolution on transient failures");
+
+DSN_DEFINE_int32(network,
+                 dns_resolver_retry_delay_ms,
+                 100,
+                 "Initial delay in milliseconds between DNS resolution retry attempts "
+                 "(doubles after each retry up to max 5000ms)");
 
 dns_resolver::dns_resolver()
     : METRIC_VAR_INIT_server(dns_resolver_cache_size),
@@ -109,37 +127,76 @@ error_s dns_resolver::resolve_addresses(const host_port &hp, std::vector<rpc_add
 
     METRIC_VAR_INCREMENT(dns_resolver_cache_miss);
 
-    std::vector<rpc_address> resolved_addresses;
-    {
-        METRIC_VAR_AUTO_LATENCY(dns_resolver_resolve_by_dns_duration_ns);
-        auto err = hp.resolve_addresses(resolved_addresses);
-        if (!err) {
-            METRIC_VAR_INCREMENT(dns_resolver_resolve_failure);
-            LOG_ERROR("failed to resolve host_port '{}': {}", hp, err.description());
-            return err;
+    // Retry logic for DNS resolution with exponential backoff
+    int retry_count = 0;
+    int delay_ms = FLAGS_dns_resolver_retry_delay_ms;
+    error_s last_err;
+
+    while (retry_count <= FLAGS_dns_resolver_retry_max_count) {
+        std::vector<rpc_address> resolved_addresses;
+        {
+            METRIC_VAR_AUTO_LATENCY(dns_resolver_resolve_by_dns_duration_ns);
+            last_err = hp.resolve_addresses(resolved_addresses);
+        }
+
+        if (last_err) {
+            // Success
+            {
+                if (resolved_addresses.size() > 1) {
+                    LOG_DEBUG("host_port '{}' resolves to {} different addresses {}, only the first one {} "
+                              "will be cached.",
+                              hp,
+                              resolved_addresses.size(),
+                              fmt::join(resolved_addresses, ","),
+                              resolved_addresses[0]);
+                }
+
+                utils::auto_write_lock l(_lock);
+                const auto it = _dns_cache.insert(std::make_pair(hp, resolved_addresses[0]));
+                if (it.second) {
+                    METRIC_VAR_INCREMENT(dns_resolver_cache_size);
+                }
+            }
+
+            addresses = std::move(resolved_addresses);
+            METRIC_VAR_INCREMENT(dns_resolver_resolve_success);
+
+            if (retry_count > 0) {
+                LOG_INFO("DNS resolution succeeded for '{}' after {} retry attempt(s)",
+                         hp,
+                         retry_count);
+            }
+            return error_s::ok();
+        }
+
+        // Check if error is transient (worth retrying)
+        if (retry_count < FLAGS_dns_resolver_retry_max_count) {
+            METRIC_VAR_INCREMENT(dns_resolver_resolve_retry);
+            LOG_WARNING("DNS resolution failed for '{}' (attempt {}/{}): {}, retrying in {}ms...",
+                         hp,
+                         retry_count + 1,
+                         FLAGS_dns_resolver_retry_max_count + 1,
+                         last_err.description(),
+                         delay_ms);
+
+            // Sleep before retry with exponential backoff
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+
+            // Exponential backoff: double the delay, capped at 5000ms
+            delay_ms = std::min(delay_ms * 2, 5000);
+            retry_count++;
+        } else {
+            break; // Max retries reached
         }
     }
 
-    {
-        if (resolved_addresses.size() > 1) {
-            LOG_DEBUG("host_port '{}' resolves to {} different addresses {}, only the first one {} "
-                      "will be cached.",
-                      hp,
-                      resolved_addresses.size(),
-                      fmt::join(resolved_addresses, ","),
-                      resolved_addresses[0]);
-        }
-
-        utils::auto_write_lock l(_lock);
-        const auto it = _dns_cache.insert(std::make_pair(hp, resolved_addresses[0]));
-        if (it.second) {
-            METRIC_VAR_INCREMENT(dns_resolver_cache_size);
-        }
-    }
-
-    addresses = std::move(resolved_addresses);
-    METRIC_VAR_INCREMENT(dns_resolver_resolve_success);
-    return error_s::ok();
+    // All retries failed
+    METRIC_VAR_INCREMENT(dns_resolver_resolve_failure);
+    LOG_ERROR("Failed to resolve host_port '{}' after {} retry attempts: {}",
+              hp,
+              retry_count,
+              last_err.description());
+    return last_err;
 }
 
 // NOLINTNEXTLINE(misc-no-recursion)
