@@ -210,21 +210,20 @@ bool replica_helper::parse_server_list(const char *server_list,
     ::dsn::utils::split_args(server_list, host_port_strs, ',');
     for (const auto &host_port_str : host_port_strs) {
         const auto hp = dsn::host_port::from_string(host_port_str);
-        if (!hp) {
-            LOG_ERROR("invalid host_port '{}' specified in '{}'", host_port_str, server_list);
-            return false;
-        }
 
-        // Validate DNS resolution early to catch configuration errors
-        rpc_address resolved_addr = hp.resolve();
-        if (!resolved_addr) {
-            LOG_ERROR("failed to resolve host_port '{}' to IP address - DNS resolution failed. "
-                      "Please ensure the hostname is valid and reachable",
-                      host_port_str);
+        // Use centralized validation helper to check host_port validity and DNS resolution
+        auto err = validate_host_port_resolution(hp);
+        if (err) {
+            LOG_ERROR("invalid host_port '{}' specified in '{}': {}",
+                      host_port_str,
+                      server_list,
+                      err.description());
             return false;
         }
 
         servers.push_back(hp);
+        // Log successful resolution for visibility
+        rpc_address resolved_addr = hp.resolve();
         LOG_INFO("parsed meta server: {} (resolved to {})", host_port_str, resolved_addr);
     }
 
