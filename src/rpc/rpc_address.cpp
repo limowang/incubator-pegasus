@@ -40,18 +40,27 @@
 #include "utils/error_code.h"
 #include "utils/fixed_size_buffer_pool.h"
 #include "utils/fmt_logging.h"
+#include "utils/metrics.h"
 #include "utils/ports.h"
 #include "utils/safe_strerror_posix.h"
 #include "utils/string_conv.h"
 #include "utils/strings.h"
 
+METRIC_DECLARE_counter(dns_resolver_slow_resolution);
+
 namespace dsn {
 /*static*/
 error_s rpc_address::GetAddrInfo(std::string_view hostname, const addrinfo &hints, AddrInfo *info)
 {
+    uint64_t start_time = dsn_now_ns();
+
     addrinfo *res = nullptr;
     const int rc = ::getaddrinfo(hostname.data(), nullptr, &hints, &res);
     const int err = errno; // preserving the errno from the getaddrinfo() call
+
+    uint64_t duration_ns = dsn_now_ns() - start_time;
+    double duration_ms = duration_ns / 1000000.0;
+
     AddrInfo result(res, ::freeaddrinfo);
     if (dsn_unlikely(rc != 0)) {
         if (rc == EAI_SYSTEM) {
@@ -66,6 +75,14 @@ error_s rpc_address::GetAddrInfo(std::string_view hostname, const addrinfo &hint
     if (info != nullptr) {
         info->swap(result);
     }
+
+    // Log and track slow DNS resolutions (useful for debugging and monitoring)
+    if (FLAGS_dns_resolution_slow_threshold_ms > 0 && duration_ms > FLAGS_dns_resolution_slow_threshold_ms) {
+        LOG_WARNING("slow DNS resolution detected: {} took {:.1f}ms (threshold: {}ms)",
+                    hostname, duration_ms, FLAGS_dns_resolution_slow_threshold_ms);
+        METRIC_VAR_INCREMENT(dns_resolver_slow_resolution);
+    }
+
     return error_s::ok();
 }
 

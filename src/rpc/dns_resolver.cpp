@@ -85,6 +85,11 @@ METRIC_DEFINE_counter(server,
                      dsn::metric_unit::kEntries,
                      "The number of DNS cache entries that expired due to TTL");
 
+METRIC_DEFINE_counter(server,
+                     dns_resolver_slow_resolution,
+                     dsn::metric_unit::kResolves,
+                     "The number of DNS resolutions that exceeded the slow threshold");
+
 namespace dsn {
 
 DSN_DEFINE_int32(network,
@@ -110,6 +115,13 @@ DSN_DEFINE_int64(network,
                  "Time-to-live (TTL) for DNS cache entries in seconds. Entries older than "
                  "this are considered expired and will be re-resolved. Set to 0 for no expiration.");
 
+DSN_DEFINE_int32(network,
+                 dns_resolution_slow_threshold_ms,
+                 1000,
+                 "Threshold in milliseconds for logging slow DNS resolutions. DNS lookups "
+                 "taking longer than this will trigger warning logs for monitoring and debugging. "
+                 "Set to 0 to disable slow DNS resolution logging.");
+
 dns_resolver::dns_resolver()
     : METRIC_VAR_INIT_server(dns_resolver_cache_size),
       METRIC_VAR_INIT_server(dns_resolver_resolve_duration_ns),
@@ -119,7 +131,8 @@ dns_resolver::dns_resolver()
       METRIC_VAR_INIT_server(dns_resolver_cache_hit),
       METRIC_VAR_INIT_server(dns_resolver_cache_miss),
       METRIC_VAR_INIT_server(dns_resolver_cache_eviction),
-      METRIC_VAR_INIT_server(dns_resolver_cache_expired)
+      METRIC_VAR_INIT_server(dns_resolver_cache_expired),
+      METRIC_VAR_INIT_server(dns_resolver_slow_resolution)
 {
 #ifndef MOCK_TEST
     static int only_one_instance = 0;

@@ -107,6 +107,7 @@ private:
     METRIC_VAR_DECLARE_counter(dns_resolver_cache_miss);
     METRIC_VAR_DECLARE_counter(dns_resolver_cache_eviction);
     METRIC_VAR_DECLARE_counter(dns_resolver_cache_expired);
+    METRIC_VAR_DECLARE_counter(dns_resolver_slow_resolution);
 
     DISALLOW_COPY_AND_ASSIGN(dns_resolver);
     DISALLOW_MOVE_AND_ASSIGN(dns_resolver);
