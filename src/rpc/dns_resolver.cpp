@@ -25,6 +25,9 @@
 #include <thread>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+
 #include "fmt/core.h"
 #include "fmt/format.h"
 #include "rpc/dns_resolver.h"
@@ -139,6 +142,25 @@ dns_resolver::dns_resolver()
     ++only_one_instance;
     CHECK_EQ_MSG(1, only_one_instance, "dns_resolver should only created once!");
 #endif
+
+    // Register DNS cache management commands
+    _cmds.emplace_back(dsn::command_manager::instance().register_single_command(
+        "dns_resolver.clear",
+        "Clear all DNS cache entries",
+        "",
+        [this](const std::vector<std::string> &args) { return clear_cache(); }));
+
+    _cmds.emplace_back(dsn::command_manager::instance().register_single_command(
+        "dns_resolver.invalidate",
+        "Invalidate a specific DNS cache entry by host:port",
+        "<host:port>",
+        [this](const std::vector<std::string> &args) { return invalidate_host(args); }));
+
+    _cmds.emplace_back(dsn::command_manager::instance().register_single_command(
+        "dns_resolver.stats",
+        "Show DNS cache statistics",
+        "",
+        [this](const std::vector<std::string> &args) { return get_cache_stats(); }));
 }
 
 bool dns_resolver::get_cached_addresses(const host_port &hp, std::vector<rpc_address> &addresses)
@@ -371,6 +393,102 @@ std::string dns_resolver::ip_ports_from_host_ports(const std::string &host_ports
     }
 
     return fmt::format("{}", fmt::join(ip_port_vec, ","));
+}
+
+std::string dns_resolver::clear_cache()
+{
+    utils::auto_write_lock l(_lock);
+    size_t old_size = _dns_cache.size();
+    _dns_cache.clear();
+
+    // Update metrics
+    METRIC_VAR_SET(dns_resolver_cache_size, 0);
+
+    nlohmann::json result;
+    result["status"] = "ok";
+    result["message"] = fmt::format("Cleared {} DNS cache entries", old_size);
+    result["cleared_entries"] = old_size;
+    return result.dump(2);
+}
+
+std::string dns_resolver::invalidate_host(const std::vector<std::string> &args)
+{
+    if (args.empty() || args[0].empty()) {
+        nlohmann::json result;
+        result["error"] = "ERR: invalid arguments, host:port is required";
+        return result.dump(2);
+    }
+
+    const std::string &host_port_str = args[0];
+
+    // Parse the host:port string
+    host_port hp(host_port_str);
+    if (!hp) {
+        nlohmann::json result;
+        result["error"] = fmt::format("ERR: invalid host:port format '{}'", host_port_str);
+        return result.dump(2);
+    }
+
+    utils::auto_write_lock l(_lock);
+    auto it = _dns_cache.find(hp);
+    if (it == _dns_cache.end()) {
+        nlohmann::json result;
+        result["status"] = "ok";
+        result["message"] = fmt::format("Host '{}' not found in cache", host_port_str);
+        result["found"] = false;
+        return result.dump(2);
+    }
+
+    _dns_cache.erase(it);
+    METRIC_VAR_DECREMENT(dns_resolver_cache_size);
+
+    nlohmann::json result;
+    result["status"] = "ok";
+    result["message"] = fmt::format("Invalidated DNS cache entry for '{}'", host_port_str);
+    result["host_port"] = host_port_str;
+    result["found"] = true;
+    return result.dump(2);
+}
+
+std::string dns_resolver::get_cache_stats()
+{
+    utils::auto_read_lock l(_lock);
+
+    nlohmann::json result;
+    result["status"] = "ok";
+    result["cache_size"] = _dns_cache.size();
+    result["cache_max_size"] = FLAGS_dns_resolver_cache_max_size > 0 ?
+                                   FLAGS_dns_resolver_cache_max_size :
+                                   "unlimited";
+    result["cache_ttl_seconds"] = FLAGS_dns_resolver_cache_ttl_seconds;
+
+    // Calculate cache age statistics
+    uint64_t now_ns = dsn_now_ns();
+    uint64_t oldest_age_ns = 0;
+    uint64_t newest_age_ns = UINT64_MAX;
+    int expired_count = 0;
+
+    for (const auto &entry : _dns_cache) {
+        uint64_t age_ns = now_ns - entry.second.creation_time;
+        oldest_age_ns = std::max(oldest_age_ns, age_ns);
+        newest_age_ns = std::min(newest_age_ns, age_ns);
+
+        if (entry.second.is_expired(static_cast<uint64_t>(FLAGS_dns_resolver_cache_ttl_seconds) *
+                                    1000000000ULL)) {
+            expired_count++;
+        }
+    }
+
+    if (!_dns_cache.empty()) {
+        result["oldest_entry_age_seconds"] = oldest_age_ns / 1000000000.0;
+        result["newest_entry_age_seconds"] = newest_age_ns / 1000000000.0;
+    } else {
+        result["oldest_entry_age_seconds"] = 0;
+        result["newest_entry_age_seconds"] = 0;
+    }
+    result["expired_entries"] = expired_count;
+
+    return result.dump(2);
 }
 
 } // namespace dsn

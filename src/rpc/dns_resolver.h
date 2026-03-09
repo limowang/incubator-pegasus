@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "rpc/group_host_port.h"
+#include "utils/command_manager.h"
 #include "rpc/rpc_address.h"
 #include "rpc/rpc_host_port.h"
 #include "utils/errors.h"
@@ -46,6 +47,11 @@ class dns_resolver : public utils::singleton<dns_resolver>
 public:
     // Resolve comma separated host:port list 'host_ports' to comma separated ip:port list.
     static std::string ip_ports_from_host_ports(const std::string &host_ports);
+
+    // DNS cache management commands
+    std::string clear_cache();
+    std::string invalidate_host(const std::vector<std::string> &args);
+    std::string get_cache_stats();
 
 private:
     dns_resolver();
@@ -108,6 +114,8 @@ private:
     METRIC_VAR_DECLARE_counter(dns_resolver_cache_eviction);
     METRIC_VAR_DECLARE_counter(dns_resolver_cache_expired);
     METRIC_VAR_DECLARE_counter(dns_resolver_slow_resolution);
+
+    std::vector<std::unique_ptr<command_deregister>> _cmds;
 
     DISALLOW_COPY_AND_ASSIGN(dns_resolver);
     DISALLOW_MOVE_AND_ASSIGN(dns_resolver);
