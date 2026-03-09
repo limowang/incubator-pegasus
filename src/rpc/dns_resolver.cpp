@@ -47,12 +47,37 @@ METRIC_DEFINE_percentile_int64(server,
                                dns_resolver_resolve_by_dns_duration_ns,
                                dsn::metric_unit::kNanoSeconds,
                                "The duration of resolving a host port by DNS lookup");
+
+METRIC_DEFINE_counter(server,
+                     dns_resolver_resolve_success,
+                     dsn::metric_unit::kResolves,
+                     "The number of successful host_port to rpc_address resolutions");
+
+METRIC_DEFINE_counter(server,
+                     dns_resolver_resolve_failure,
+                     dsn::metric_unit::kResolves,
+                     "The number of failed host_port to rpc_address resolutions");
+
+METRIC_DEFINE_counter(server,
+                     dns_resolver_cache_hit,
+                     dsn::metric_unit::kResolves,
+                     "The number of host_port resolutions served from cache");
+
+METRIC_DEFINE_counter(server,
+                     dns_resolver_cache_miss,
+                     dsn::metric_unit::kResolves,
+                     "The number of host_port resolutions that required DNS lookup");
+
 namespace dsn {
 
 dns_resolver::dns_resolver()
     : METRIC_VAR_INIT_server(dns_resolver_cache_size),
       METRIC_VAR_INIT_server(dns_resolver_resolve_duration_ns),
-      METRIC_VAR_INIT_server(dns_resolver_resolve_by_dns_duration_ns)
+      METRIC_VAR_INIT_server(dns_resolver_resolve_by_dns_duration_ns),
+      METRIC_VAR_INIT_server(dns_resolver_resolve_success),
+      METRIC_VAR_INIT_server(dns_resolver_resolve_failure),
+      METRIC_VAR_INIT_server(dns_resolver_cache_hit),
+      METRIC_VAR_INIT_server(dns_resolver_cache_miss)
 {
 #ifndef MOCK_TEST
     static int only_one_instance = 0;
@@ -70,6 +95,7 @@ bool dns_resolver::get_cached_addresses(const host_port &hp, std::vector<rpc_add
     }
 
     addresses = {found->second};
+    METRIC_VAR_INCREMENT(dns_resolver_cache_hit);
     return true;
 }
 
@@ -77,13 +103,21 @@ error_s dns_resolver::resolve_addresses(const host_port &hp, std::vector<rpc_add
 {
     CHECK(addresses.empty(), "invalid addresses, not empty");
     if (get_cached_addresses(hp, addresses)) {
+        METRIC_VAR_INCREMENT(dns_resolver_resolve_success);
         return error_s::ok();
     }
+
+    METRIC_VAR_INCREMENT(dns_resolver_cache_miss);
 
     std::vector<rpc_address> resolved_addresses;
     {
         METRIC_VAR_AUTO_LATENCY(dns_resolver_resolve_by_dns_duration_ns);
-        RETURN_NOT_OK(hp.resolve_addresses(resolved_addresses));
+        auto err = hp.resolve_addresses(resolved_addresses);
+        if (!err) {
+            METRIC_VAR_INCREMENT(dns_resolver_resolve_failure);
+            LOG_ERROR("failed to resolve host_port '{}': {}", hp, err.description());
+            return err;
+        }
     }
 
     {
@@ -104,6 +138,7 @@ error_s dns_resolver::resolve_addresses(const host_port &hp, std::vector<rpc_add
     }
 
     addresses = std::move(resolved_addresses);
+    METRIC_VAR_INCREMENT(dns_resolver_resolve_success);
     return error_s::ok();
 }
 

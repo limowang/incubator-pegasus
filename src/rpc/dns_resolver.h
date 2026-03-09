@@ -72,6 +72,10 @@ private:
     METRIC_VAR_DECLARE_gauge_int64(dns_resolver_cache_size);
     METRIC_VAR_DECLARE_percentile_int64(dns_resolver_resolve_duration_ns);
     METRIC_VAR_DECLARE_percentile_int64(dns_resolver_resolve_by_dns_duration_ns);
+    METRIC_VAR_DECLARE_counter(dns_resolver_resolve_success);
+    METRIC_VAR_DECLARE_counter(dns_resolver_resolve_failure);
+    METRIC_VAR_DECLARE_counter(dns_resolver_cache_hit);
+    METRIC_VAR_DECLARE_counter(dns_resolver_cache_miss);
 
     DISALLOW_COPY_AND_ASSIGN(dns_resolver);
     DISALLOW_MOVE_AND_ASSIGN(dns_resolver);
