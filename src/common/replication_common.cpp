@@ -248,7 +248,7 @@ error_s replica_helper::validate_host_port_resolution(const host_port &hp)
 
     rpc_address addr = hp.resolve();
     if (!addr) {
-        return error_s::make(dsn::ERR_ADDRESS_INVALID,
+        return error_s::make(dsn::ERR_NETWORK_FAILURE,
                             fmt::format("failed to resolve host_port '{}' to IP address. "
                                        "Please ensure the hostname is valid and DNS resolution is working",
                                        hp.to_string()));

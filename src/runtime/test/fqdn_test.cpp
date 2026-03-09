@@ -25,8 +25,7 @@
 #include "rpc/rpc_host_port.h"
 #include "common/replication_other_types.h"
 
-namespace dsn {
-namespace replication {
+namespace dsn::replication {
 
 TEST(fqdn_test, test_parse_server_list_with_fqdn)
 {
@@ -142,5 +141,4 @@ TEST(fqdn_test, test_host_port_to_string_and_resolve)
     EXPECT_EQ(34801, hp_reverse.port());
 }
 
-} // namespace replication
-} // namespace dsn
+} // namespace dsn::replication
