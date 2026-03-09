@@ -419,7 +419,8 @@ error_code meta_service::start()
 
     _failure_detector->acquire_leader_lock();
     CHECK(_failure_detector->get_leader(nullptr), "must be primary at this point");
-    LOG_INFO("{}(resolved to: {}) got the primary lock, start to recover server state from remote storage",
+    LOG_INFO("{}(resolved to: {}) got the primary lock, start to recover server state from remote "
+             "storage",
              dsn_primary_host_port(),
              dsn_primary_address());
 

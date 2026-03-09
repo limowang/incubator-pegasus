@@ -243,15 +243,16 @@ error_s replica_helper::validate_host_port_resolution(const host_port &hp)
 {
     if (!hp) {
         return error_s::make(dsn::ERR_INVALID_PARAMETERS,
-                            fmt::format("invalid host_port: {}", hp.to_string()));
+                             fmt::format("invalid host_port: {}", hp.to_string()));
     }
 
     rpc_address addr = hp.resolve();
     if (!addr) {
-        return error_s::make(dsn::ERR_NETWORK_FAILURE,
-                            fmt::format("failed to resolve host_port '{}' to IP address. "
-                                       "Please ensure the hostname is valid and DNS resolution is working",
-                                       hp.to_string()));
+        return error_s::make(
+            dsn::ERR_NETWORK_FAILURE,
+            fmt::format("failed to resolve host_port '{}' to IP address. "
+                        "Please ensure the hostname is valid and DNS resolution is working",
+                        hp.to_string()));
     }
 
     return error_s::ok();

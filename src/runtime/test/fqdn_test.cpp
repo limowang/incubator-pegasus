@@ -30,7 +30,8 @@ namespace dsn::replication {
 TEST(fqdn_test, test_parse_server_list_with_fqdn)
 {
     // Test parsing FQDN meta server list
-    const char *server_list = "meta1.example.com:34801,meta2.example.com:34802,meta3.example.com:34803";
+    const char *server_list =
+        "meta1.example.com:34801,meta2.example.com:34802,meta3.example.com:34803";
 
     std::vector<host_port> servers;
     bool result = replica_helper::parse_server_list(server_list, servers);
