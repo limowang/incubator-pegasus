@@ -110,6 +110,10 @@ public:
     static bool load_servers_from_config(const std::string &section,
                                          const std::string &key,
                                          /*out*/ std::vector<dsn::host_port> &servers);
+
+    // Validate that a host_port can be resolved to an IP address. Returns error_s::ok() if
+    // resolution succeeds, otherwise returns an error with details.
+    static dsn::error_s validate_host_port_resolution(const dsn::host_port &hp);
 };
 } // namespace replication
 } // namespace dsn

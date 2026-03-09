@@ -214,7 +214,18 @@ bool replica_helper::parse_server_list(const char *server_list,
             LOG_ERROR("invalid host_port '{}' specified in '{}'", host_port_str, server_list);
             return false;
         }
+
+        // Validate DNS resolution early to catch configuration errors
+        rpc_address resolved_addr = hp.resolve();
+        if (!resolved_addr) {
+            LOG_ERROR("failed to resolve host_port '{}' to IP address - DNS resolution failed. "
+                      "Please ensure the hostname is valid and reachable",
+                      host_port_str);
+            return false;
+        }
+
         servers.push_back(hp);
+        LOG_INFO("parsed meta server: {} (resolved to {})", host_port_str, resolved_addr);
     }
 
     if (servers.empty()) {
@@ -226,6 +237,25 @@ bool replica_helper::parse_server_list(const char *server_list,
         return false;
     }
     return true;
+}
+
+/*static*/
+error_s replica_helper::validate_host_port_resolution(const host_port &hp)
+{
+    if (!hp) {
+        return error_s::make(dsn::ERR_INVALID_PARAMETERS,
+                            fmt::format("invalid host_port: {}", hp.to_string()));
+    }
+
+    rpc_address addr = hp.resolve();
+    if (!addr) {
+        return error_s::make(dsn::ERR_ADDRESS_INVALID,
+                            fmt::format("failed to resolve host_port '{}' to IP address. "
+                                       "Please ensure the hostname is valid and DNS resolution is working",
+                                       hp.to_string()));
+    }
+
+    return error_s::ok();
 }
 
 /*static*/ bool

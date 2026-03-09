@@ -757,10 +757,21 @@ void replica_stub::initialize(const replication_options &opts, bool clear /* = f
 {
     _primary_host_port = dsn_primary_host_port();
     _primary_host_port_cache = _primary_host_port.to_string();
-    LOG_INFO("primary_host_port = {}", _primary_host_port_cache);
+    LOG_INFO("primary_host_port = {} (resolved to {})",
+             _primary_host_port_cache,
+             _primary_host_port.resolve());
 
     set_options(opts);
-    LOG_INFO("meta_servers = {}", fmt::join(_options.meta_servers, ", "));
+
+    // Log meta servers with both hostname and resolved IP for better debugging
+    if (!_options.meta_servers.empty()) {
+        std::vector<std::string> meta_server_strs;
+        for (const auto &hp : _options.meta_servers) {
+            rpc_address addr = hp.resolve();
+            meta_server_strs.push_back(fmt::format("{}({})", hp, addr));
+        }
+        LOG_INFO("meta_servers = {}", fmt::join(meta_server_strs, ", "));
+    }
 
     _deny_client = FLAGS_deny_client_on_start;
     _verbose_client_log = FLAGS_verbose_client_log_on_start;
