@@ -221,9 +221,9 @@ bool replica_helper::parse_server_list(const char *server_list,
             return false;
         }
 
-        servers.push_back(hp);
-        // Log successful resolution for visibility
+        // Resolve once for both validation and logging
         rpc_address resolved_addr = hp.resolve();
+        servers.push_back(hp);
         LOG_INFO("parsed meta server: {} (resolved to {})", host_port_str, resolved_addr);
     }
 
