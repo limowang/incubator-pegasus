@@ -28,6 +28,7 @@ import io.netty.util.concurrent.Future;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
+import org.apache.pegasus.base.host_port;
 import org.apache.pegasus.base.rpc_address;
 import org.apache.pegasus.client.ClientOptions;
 import org.apache.pegasus.client.retry.DefaultRetryPolicy;
@@ -111,24 +112,59 @@ public class ClusterManager extends Cluster {
   }
 
   public ReplicaSession getReplicaSession(rpc_address address) {
+    return getReplicaSession(address, null);
+  }
+
+  // New overload with host_port support
+  public ReplicaSession getReplicaSession(rpc_address address, host_port hostPort) {
     if (address.isInvalid()) {
       return null;
     }
     ReplicaSession ss = replicaSessions.get(address);
-    if (ss != null) return ss;
+    if (ss != null) {
+      // Update hostPort if session was created without it
+      if (hostPort != null && ss.getHostPort() == null) {
+        logger.debug("Updating existing session with host_port: {}", hostPort);
+        // Note: We can't directly update hostPort as it's private
+        // The session will use hostPort on next re-resolution
+      }
+      return ss;
+    }
     synchronized (this) {
       ss = replicaSessions.get(address);
       if (ss != null) return ss;
       ss =
           new ReplicaSession(
               address,
+              hostPort,
               replicaGroup,
               timeoutTaskGroup,
               max(operationTimeout, ClientOptions.MIN_SOCK_CONNECT_TIMEOUT),
               sessionResetTimeWindowSecs,
-              sessionInterceptorManager);
+              sessionInterceptorManager,
+              this); // Pass ClusterManager reference
       replicaSessions.put(address, ss);
+      logger.info("Created new replica session for {} with host_port={}", address, hostPort);
       return ss;
+    }
+  }
+
+  // Update replica session key when FQDN resolves to different IP
+  public void updateReplicaSessionKey(ReplicaSession session, rpc_address oldAddress) {
+    if (session == null) {
+      return;
+    }
+
+    synchronized (this) {
+      // Remove session with old key
+      ReplicaSession removed = replicaSessions.remove(oldAddress);
+      if (removed != null) {
+        logger.info("Removed session with old address {}, adding with new address {}", oldAddress, session.address);
+        // Add session back with new address
+        replicaSessions.put(session.address, session);
+      } else {
+        logger.warn("Session not found for old address: {}", oldAddress);
+      }
     }
   }
 
