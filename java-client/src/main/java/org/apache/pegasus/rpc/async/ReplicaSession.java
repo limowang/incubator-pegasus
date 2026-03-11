@@ -40,6 +40,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.pegasus.base.error_code;
+import org.apache.pegasus.base.host_port;
 import org.apache.pegasus.base.rpc_address;
 import org.apache.pegasus.operator.client_operator;
 import org.apache.pegasus.rpc.interceptor.ReplicaSessionInterceptorManager;
@@ -69,10 +70,31 @@ public class ReplicaSession {
       int socketTimeout,
       long sessionResetTimeWindowSec,
       ReplicaSessionInterceptorManager interceptorManager) {
+    this(address, null, rpcGroup, timeoutTaskGroup, socketTimeout, sessionResetTimeWindowSec, interceptorManager, null);
+  }
+
+  // New constructor with host_port support
+  public ReplicaSession(
+      rpc_address address,
+      host_port hostPort,
+      EventLoopGroup rpcGroup,
+      EventLoopGroup timeoutTaskGroup,
+      int socketTimeout,
+      long sessionResetTimeWindowSec,
+      ReplicaSessionInterceptorManager interceptorManager,
+      ClusterManager clusterManager) {
     this.address = address;
+    this.hostPort = hostPort;
+    this.clusterManager = clusterManager;
     this.timeoutTaskGroup = timeoutTaskGroup;
     this.interceptorManager = interceptorManager;
     this.sessionResetTimeWindowMs = sessionResetTimeWindowSec * 1000;
+
+    // Store last resolved host/port from host_port if available
+    if (hostPort != null) {
+      this.lastResolvedHost = hostPort.getHost();
+      this.lastResolvedPort = hostPort.getPort();
+    }
 
     final ReplicaSession this_ = this;
     boot = new Bootstrap();
@@ -181,12 +203,65 @@ public class ReplicaSession {
     return address.toString();
   }
 
+  // Getter for host_port
+  public host_port getHostPort() {
+    return hostPort;
+  }
+
+  // Resolve host_port to rpc_address
+  private rpc_address resolveHostPort(host_port hp) {
+    try {
+      String hostPort = hp.getHost() + ":" + hp.getPort();
+      rpc_address addr = rpc_address.fromIpPort(hostPort);
+      if (addr != null && !addr.isInvalid()) {
+        logger.info("Resolved host_port {} to {}", hp, addr);
+        return addr;
+      }
+    } catch (Exception e) {
+      logger.error("Failed to resolve host_port: {}", hp, e);
+    }
+    return null;
+  }
+
+  // Check if FQDN needs re-resolution
+  private boolean needsReResolution() {
+    return hostPort != null
+        && lastResolvedHost != null
+        && (fields.state == ConnState.DISCONNECTED
+            || fields.state == ConnState.CONNECTING);
+  }
+
+  // Re-resolve FQDN and update address if needed
+  private void resolveAndUpdateAddress() {
+    if (hostPort == null || clusterManager == null) {
+      return; // No FQDN support or no manager reference
+    }
+
+    logger.info("Attempting to re-resolve FQDN: {}", hostPort);
+    rpc_address newAddr = resolveHostPort(hostPort);
+
+    if (newAddr != null && !newAddr.isInvalid() && !newAddr.equals(address)) {
+      logger.info("FQDN resolved to new IP: {} -> {}", address, newAddr);
+      rpc_address oldAddr = address;
+      address = newAddr;
+      // Update the session key in ClusterManager
+      clusterManager.updateReplicaSessionKey(this, oldAddr);
+    } else {
+      logger.debug("FQDN resolution returned same or invalid address");
+    }
+  }
+
   /**
    * Connects to remote host if it is currently disconnected.
    *
    * @return a nullable ChannelFuture.
    */
   public ChannelFuture tryConnect() {
+    // Check if we need to re-resolve FQDN
+    if (needsReResolution()) {
+      resolveAndUpdateAddress();
+    }
+
     boolean needConnect = false;
     synchronized (pendingSend) {
       if (fields.state == ConnState.DISCONNECTED) {
@@ -531,7 +606,11 @@ public class ReplicaSession {
 
   volatile VolatileFields fields = new VolatileFields(ConnState.DISCONNECTED);
 
-  private final rpc_address address;
+  private rpc_address address; // Changed to non-final for FQDN re-resolution
+  private host_port hostPort; // Store original FQDN for re-resolution
+  private String lastResolvedHost; // Last resolved hostname
+  private int lastResolvedPort; // Last resolved port
+  private ClusterManager clusterManager; // Reference to manager for key updates
   private final Bootstrap boot;
   private final EventLoopGroup timeoutTaskGroup;
   private final ReplicaSessionInterceptorManager interceptorManager;
