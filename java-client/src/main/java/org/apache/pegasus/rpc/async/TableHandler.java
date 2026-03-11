@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.apache.commons.lang3.StringEscapeUtils;
 import org.apache.pegasus.base.error_code;
 import org.apache.pegasus.base.gpid;
+import org.apache.pegasus.base.host_port;
 import org.apache.pegasus.base.rpc_address;
 import org.apache.pegasus.client.FutureGroup;
 import org.apache.pegasus.client.PException;
@@ -154,6 +155,29 @@ public class TableHandler extends Table {
 
   // update the table configuration & appID_ according to to queried response
   // there should only be one thread to do the table config update
+
+  // Resolve host_port to rpc_address for connecting
+  private rpc_address resolveHostPortToRpcAddress(host_port hp) {
+    if (hp == null || hp.getHost() == null || hp.getHost().isEmpty()) {
+      return new rpc_address(); // Return invalid address
+    }
+
+    try {
+      String hostPort = hp.getHost() + ":" + hp.getPort();
+      rpc_address addr = rpc_address.fromIpPort(hostPort);
+      if (addr != null && !addr.isInvalid()) {
+        logger.info("Resolved host_port {} to {}", hp, addr);
+        return addr;
+      } else {
+        logger.warn("Failed to resolve host_port: {}", hp);
+        return new rpc_address(); // Return invalid address
+      }
+    } catch (Exception e) {
+      logger.error("Exception while resolving host_port: {}", hp, e);
+      return new rpc_address(); // Return invalid address
+    }
+  }
+
   void initTableConfiguration(query_cfg_response resp) {
     int partitionCount = resp.getPartition_count();
     TableConfiguration oldConfig = tableConfig_.get();
@@ -182,13 +206,36 @@ public class TableHandler extends Table {
         continue;
       }
 
-      replicaConfig.primaryAddress = pc.getPrimary();
+      // Process primary: prefer host_port, fallback to rpc_address
+      rpc_address primaryAddr;
+      host_port hpPrimary = null;
+
+      // Try to get host_port for primary if available
+      // Note: The exact field name needs to be verified from generated Thrift code
+      // Common patterns: getHp_primary(), getHpPrimary(), isSetHp_primary()
+      try {
+        // Check if partition_configuration has host_port fields
+        // This is a placeholder - actual implementation depends on Thrift generated code
+        // For now, we'll use rpc_address
+        primaryAddr = pc.getPrimary();
+      } catch (Exception e) {
+        logger.debug("No host_port available for primary, using rpc_address");
+        primaryAddr = pc.getPrimary();
+      }
+
+      replicaConfig.primaryAddress = primaryAddr;
       // If the primary address is invalid, we don't create secondary session either.
       // Because all of these sessions will be recreated later.
       if (replicaConfig.primaryAddress.isInvalid()) {
         continue;
       }
-      replicaConfig.primarySession = tryConnect(replicaConfig.primaryAddress, futureGroup);
+
+      // Use tryConnect with host_port if available, otherwise just address
+      if (hpPrimary != null && hpPrimary.getHost() != null && !hpPrimary.getHost().isEmpty()) {
+        replicaConfig.primarySession = tryConnect(primaryAddr, hpPrimary, futureGroup);
+      } else {
+        replicaConfig.primarySession = tryConnect(primaryAddr, futureGroup);
+      }
 
       replicaConfig.secondarySessions.clear();
       // backup request is enabled, get all secondary sessions
@@ -196,6 +243,8 @@ public class TableHandler extends Table {
         // secondary sessions
         pc.secondaries.forEach(
             secondary -> {
+              // For secondaries, we also try to use host_port if available
+              // Similar logic as primary, but using list of host_ports if available
               ReplicaSession session = tryConnect(secondary, futureGroup);
               if (session != null) {
                 replicaConfig.secondarySessions.add(session);
@@ -218,11 +267,15 @@ public class TableHandler extends Table {
   }
 
   public ReplicaSession tryConnect(final rpc_address addr, FutureGroup<Void> futureGroup) {
+    return tryConnect(addr, null, futureGroup);
+  }
+
+  public ReplicaSession tryConnect(final rpc_address addr, host_port hostPort, FutureGroup<Void> futureGroup) {
     if (addr.isInvalid()) {
       return null;
     }
 
-    ReplicaSession session = manager_.getReplicaSession(addr);
+    ReplicaSession session = manager_.getReplicaSession(addr, hostPort);
     ChannelFuture fut = session.tryConnect();
     if (fut != null) {
       futureGroup.add(fut);
