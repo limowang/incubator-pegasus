@@ -211,15 +211,24 @@ public class TableHandler extends Table {
       host_port hpPrimary = null;
 
       // Try to get host_port for primary if available
-      // Note: The exact field name needs to be verified from generated Thrift code
-      // Common patterns: getHp_primary(), getHpPrimary(), isSetHp_primary()
+      // According to IDL: field 9 is hp_primary
       try {
-        // Check if partition_configuration has host_port fields
-        // This is a placeholder - actual implementation depends on Thrift generated code
-        // For now, we'll use rpc_address
-        primaryAddr = pc.getPrimary();
+        if (pc.isSetHp_primary()) {
+          hpPrimary = pc.getHp_primary();
+          logger.debug("Using host_port for primary: {}", hpPrimary);
+          // Resolve host_port to rpc_address
+          primaryAddr = resolveHostPortToRpcAddress(hpPrimary);
+          // If resolution fails, fallback to rpc_address
+          if (primaryAddr.isInvalid()) {
+            logger.warn("Failed to resolve host_port {}, using rpc_address", hpPrimary);
+            primaryAddr = pc.getPrimary();
+          }
+        } else {
+          logger.debug("No host_port for primary, using rpc_address");
+          primaryAddr = pc.getPrimary();
+        }
       } catch (Exception e) {
-        logger.debug("No host_port available for primary, using rpc_address");
+        logger.debug("Exception accessing hp_primary, using rpc_address: {}", e.getMessage());
         primaryAddr = pc.getPrimary();
       }
 
@@ -240,16 +249,60 @@ public class TableHandler extends Table {
       replicaConfig.secondarySessions.clear();
       // backup request is enabled, get all secondary sessions
       if (isBackupRequestEnabled()) {
+        // Try to get host_port list for secondaries
+        // According to IDL: field 10 is hp_secondaries
+        List<host_port> hpSecondaries = null;
+        try {
+          if (pc.isSetHp_secondaries()) {
+            hpSecondaries = pc.getHp_secondaries();
+            logger.debug("Using host_port for secondaries: {}", hpSecondaries);
+          }
+        } catch (Exception e) {
+          logger.debug("Exception accessing hp_secondaries: {}", e.getMessage());
+        }
+
         // secondary sessions
-        pc.secondaries.forEach(
-            secondary -> {
-              // For secondaries, we also try to use host_port if available
-              // Similar logic as primary, but using list of host_ports if available
-              ReplicaSession session = tryConnect(secondary, futureGroup);
+        if (hpSecondaries != null && !hpSecondaries.isEmpty()) {
+          // Use host_port for secondaries
+          for (int i = 0; i < pc.getSecondariesSize(); i++) {
+            rpc_address secondaryAddr = pc.getSecondaries().get(i);
+            if (secondaryAddr.isInvalid()) {
+              continue;
+            }
+
+            host_port hp = (i < hpSecondaries.size()) ? hpSecondaries.get(i) : null;
+            if (hp != null && hp.getHost() != null && !hp.getHost().isEmpty()) {
+              // Resolve host_port to rpc_address
+              rpc_address resolvedAddr = resolveHostPortToRpcAddress(hp);
+              if (!resolvedAddr.isInvalid()) {
+                ReplicaSession session = tryConnect(resolvedAddr, hp, futureGroup);
+                if (session != null) {
+                  replicaConfig.secondarySessions.add(session);
+                }
+              } else {
+                // Fallback to rpc_address if resolution fails
+                ReplicaSession session = tryConnect(secondaryAddr, futureGroup);
+                if (session != null) {
+                  replicaConfig.secondarySessions.add(session);
+                }
+              }
+            } else {
+              ReplicaSession session = tryConnect(secondaryAddr, futureGroup);
               if (session != null) {
                 replicaConfig.secondarySessions.add(session);
               }
-            });
+            }
+          }
+        } else {
+          // Use rpc_address for secondaries (backward compatible)
+          pc.secondaries.forEach(
+              secondary -> {
+                ReplicaSession session = tryConnect(secondary, futureGroup);
+                if (session != null) {
+                  replicaConfig.secondarySessions.add(session);
+                }
+              });
+        }
       }
     }
 
