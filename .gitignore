@@ -350,3 +350,6 @@ thirdparty/output/
 
 #collector
 collector/collector
+
+# Git worktrees for isolated development
+.worktrees/
