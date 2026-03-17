@@ -250,4 +250,63 @@ public class host_port
     // check for required fields
     // check for sub-struct validity
   }
+
+  // ========== FQDN Support: New Methods ==========
+
+  /**
+   * Resolve this host_port to rpc_address. This method uses the HostPortResolver to perform DNS
+   * resolution.
+   *
+   * @return resolved rpc_address
+   * @throws org.apache.pegasus.client.PException if resolution fails
+   */
+  public rpc_address resolve() throws org.apache.pegasus.client.PException {
+    // Use the singleton resolver
+    return org.apache.pegasus.util.HostPortResolver.resolve(this);
+  }
+
+  /**
+   * Create host_port from rpc_address. Performs reverse DNS lookup if possible.
+   *
+   * @param addr the rpc_address
+   * @return host_port object, or null if resolution fails
+   */
+  public static host_port fromAddress(rpc_address addr) {
+    if (addr == null || addr.isInvalid()) {
+      return null;
+    }
+
+    try {
+      String ip = addr.get_ip();
+      int port = addr.get_port();
+
+      host_port hp = new host_port();
+      hp.setHost(ip);
+      hp.setPort((short) port);
+      hp.setHostPortType((byte) 1); // HOST_TYPE_IPV4
+
+      return hp;
+    } catch (Exception e) {
+      // If reverse lookup fails, return null
+      return null;
+    }
+  }
+
+  /**
+   * Check if this host_port is valid.
+   *
+   * @return true if host and port are set and valid
+   */
+  public boolean isValid() {
+    return host != null && !host.isEmpty() && getPort() > 0;
+  }
+
+  /**
+   * Get string representation in format "host:port".
+   *
+   * @return string representation
+   */
+  public String toHostPortString() {
+    return host + ":" + getPort();
+  }
 }

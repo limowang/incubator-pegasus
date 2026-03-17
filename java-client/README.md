@@ -75,6 +75,14 @@ async_workers = 4
 enable_perf_counter = true
 perf_counter_tags = k1=v1,k2=v2,k3=v3
 push_counter_interval_secs = 10
+
+# FQDN Support (optional)
+# Enable FQDN DNS resolution for hostname-to-IP mapping
+pegasus.fqdn.enabled = true
+# DNS cache TTL in milliseconds (default: 300000 = 5 minutes)
+pegasus.fqdn.cache_ttl = 300000
+# Maximum DNS cache size (default: 1000 entries)
+pegasus.fqdn.max_cache_size = 1000
 ```
 
 You can provide a parameter of `configPath` when creating a client instance.

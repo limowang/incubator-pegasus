@@ -22,6 +22,7 @@ package org.apache.pegasus.client;
 import java.util.Properties;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pegasus.rpc.Cluster;
+import org.apache.pegasus.util.HostPortResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,6 +42,21 @@ public abstract class PegasusAbstractClient {
   protected PegasusAbstractClient(ClientOptions options) throws PException {
     this.clientOptions = options;
     this.cluster = Cluster.createCluster(clientOptions);
+
+    // Initialize FQDN DNS resolver if enabled
+    if (clientOptions.isFQDNSupportEnabled()) {
+      try {
+        HostPortResolver.initialize(
+            clientOptions.getDNSCacheTTL(), clientOptions.getDNSMaxCacheSize());
+        LOGGER.info(
+            "FQDN DNS resolver initialized: cacheTTL={}ms, maxCacheSize={}",
+            clientOptions.getDNSCacheTTL(),
+            clientOptions.getDNSMaxCacheSize());
+      } catch (Exception e) {
+        LOGGER.warn("Failed to initialize FQDN DNS resolver, continuing without it", e);
+      }
+    }
+
     LOGGER.info(
         "Create Pegasus{}Client Instance By ClientOptions : {}",
         this.clientType(),
@@ -64,6 +80,15 @@ public abstract class PegasusAbstractClient {
         cluster.close();
         cluster = null;
         LOGGER.info("finish to close pegasus {} client for [{}]", clientType(), metaList);
+      }
+      // Shutdown FQDN DNS resolver
+      if (clientOptions.isFQDNSupportEnabled()) {
+        try {
+          HostPortResolver.shutdown();
+          LOGGER.debug("FQDN DNS resolver shutdown completed");
+        } catch (Exception e) {
+          LOGGER.warn("Failed to shutdown FQDN DNS resolver", e);
+        }
       }
     }
   }

@@ -74,6 +74,12 @@ public class ClientOptions {
   public static final String DEFAULT_RETRY_POLICY = RetryPolicies.DEFAULT.name().toLowerCase();
   public static final long DEFAULT_RETRY_BASE_INTERVAL_MS = 20;
   public static final int DEFAULT_RETRY_MAX_TIMES = Integer.MAX_VALUE;
+  public static final String PEGASUS_FQDN_ENABLED_KEY = "pegasus.fqdn.enabled";
+  public static final String PEGASUS_FQDN_CACHE_TTL_KEY = "pegasus.fqdn.cache_ttl";
+  public static final String PEGASUS_FQDN_MAX_CACHE_SIZE_KEY = "pegasus.fqdn.max_cache_size";
+  public static final boolean DEFAULT_FQDN_ENABLED = true;
+  public static final long DEFAULT_FQDN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+  public static final int DEFAULT_FQDN_MAX_CACHE_SIZE = 1000;
   private final String metaServers;
   private final Duration operationTimeout;
   private final int asyncWorkers;
@@ -87,6 +93,9 @@ public class ClientOptions {
   private final RetryPolicies retryPolicy;
   private final Duration retryBaseInterval;
   private final int retryMaxTimes;
+  private final boolean enableFQDNSupport;
+  private final long dnsCacheTTLMillis;
+  private final int dnsMaxCacheSize;
 
   protected ClientOptions(Builder builder) {
     this.metaServers = builder.metaServers;
@@ -102,6 +111,9 @@ public class ClientOptions {
     this.retryPolicy = builder.retryPolicy;
     this.retryBaseInterval = builder.retryBaseInterval;
     this.retryMaxTimes = builder.retryMaxTimes;
+    this.enableFQDNSupport = builder.enableFQDNSupport;
+    this.dnsCacheTTLMillis = builder.dnsCacheTTLMillis;
+    this.dnsMaxCacheSize = builder.dnsMaxCacheSize;
   }
 
   protected ClientOptions(ClientOptions original) {
@@ -118,6 +130,9 @@ public class ClientOptions {
     this.retryPolicy = original.getRetryPolicy();
     this.retryBaseInterval = original.getRetryBaseInterval();
     this.retryMaxTimes = original.getRetryMaxTimes();
+    this.enableFQDNSupport = original.isFQDNSupportEnabled();
+    this.dnsCacheTTLMillis = original.getDNSCacheTTL();
+    this.dnsMaxCacheSize = original.getDNSMaxCacheSize();
   }
 
   /**
@@ -307,6 +322,9 @@ public class ClientOptions {
     private RetryPolicies retryPolicy = RetryPolicies.valueOf(DEFAULT_RETRY_POLICY.toUpperCase());
     private Duration retryBaseInterval = Duration.ofMillis(DEFAULT_RETRY_BASE_INTERVAL_MS);
     private int retryMaxTimes = DEFAULT_RETRY_MAX_TIMES;
+    private boolean enableFQDNSupport = DEFAULT_FQDN_ENABLED;
+    private long dnsCacheTTLMillis = DEFAULT_FQDN_CACHE_TTL;
+    private int dnsMaxCacheSize = DEFAULT_FQDN_MAX_CACHE_SIZE;
 
     protected Builder() {}
 
@@ -455,6 +473,45 @@ public class ClientOptions {
     }
 
     /**
+     * Enable FQDN support for DNS resolution. When enabled, the client will resolve hostnames to IP
+     * addresses using the configured DNS cache. Defaults to {@literal #DEFAULT_FQDN_ENABLED}.
+     *
+     * @param enable {@code true} to enable FQDN support, {@code false} to disable
+     * @return {@code this}
+     */
+    public Builder enableFQDNSupport(boolean enable) {
+      this.enableFQDNSupport = enable;
+      return this;
+    }
+
+    /**
+     * Set the DNS cache TTL (time-to-live) in milliseconds. Cached DNS resolutions will expire
+     * after this duration and be refreshed on next access. Defaults to {@literal
+     * #DEFAULT_FQDN_CACHE_TTL}.
+     *
+     * @param ttlMillis cache TTL in milliseconds, must be positive
+     * @return {@code this}
+     */
+    public Builder dnsCacheTTL(long ttlMillis) {
+      assert ttlMillis > 0 : String.format("must pass positive value: %d", ttlMillis);
+      this.dnsCacheTTLMillis = ttlMillis;
+      return this;
+    }
+
+    /**
+     * Set the maximum size of the DNS cache. When the cache exceeds this size, the least recently
+     * used entries will be evicted. Defaults to {@literal #DEFAULT_FQDN_MAX_CACHE_SIZE}.
+     *
+     * @param maxSize maximum cache size, must be positive
+     * @return {@code this}
+     */
+    public Builder dnsMaxCacheSize(int maxSize) {
+      assert maxSize > 0 : String.format("must pass positive value: %d", maxSize);
+      this.dnsMaxCacheSize = maxSize;
+      return this;
+    }
+
+    /**
      * Create a new instance of {@link ClientOptions}.
      *
      * @return new instance of {@link ClientOptions}.
@@ -599,5 +656,17 @@ public class ClientOptions {
 
   public int getRetryMaxTimes() {
     return retryMaxTimes;
+  }
+
+  public boolean isFQDNSupportEnabled() {
+    return enableFQDNSupport;
+  }
+
+  public long getDNSCacheTTL() {
+    return dnsCacheTTLMillis;
+  }
+
+  public int getDNSMaxCacheSize() {
+    return dnsMaxCacheSize;
   }
 }

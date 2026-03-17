@@ -182,7 +182,26 @@ public class TableHandler extends Table {
         continue;
       }
 
-      replicaConfig.primaryAddress = pc.getPrimary();
+      // Try to use hp_primary (FQDN) first, fallback to primary (IP) if not available
+      if (pc.isSetHp_primary()) {
+        // Resolve FQDN to IP address
+        try {
+          replicaConfig.primaryAddress = pc.getHp_primary().resolve();
+          logger.debug(
+              "Using FQDN for primary: {} -> {}",
+              pc.getHp_primary().toHostPortString(),
+              replicaConfig.primaryAddress);
+        } catch (PException e) {
+          logger.warn(
+              "Failed to resolve hp_primary {}, falling back to primary: {}",
+              pc.getHp_primary().toHostPortString(),
+              e.getMessage());
+          replicaConfig.primaryAddress = pc.getPrimary();
+        }
+      } else {
+        // Fallback to legacy primary field
+        replicaConfig.primaryAddress = pc.getPrimary();
+      }
       // If the primary address is invalid, we don't create secondary session either.
       // Because all of these sessions will be recreated later.
       if (replicaConfig.primaryAddress.isInvalid()) {
@@ -193,14 +212,40 @@ public class TableHandler extends Table {
       replicaConfig.secondarySessions.clear();
       // backup request is enabled, get all secondary sessions
       if (isBackupRequestEnabled()) {
-        // secondary sessions
-        pc.secondaries.forEach(
-            secondary -> {
-              ReplicaSession session = tryConnect(secondary, futureGroup);
-              if (session != null) {
-                replicaConfig.secondarySessions.add(session);
-              }
-            });
+        // secondary sessions - try hp_secondaries (FQDN) first, fallback to secondaries (IP)
+        if (pc.isSetHp_secondaries() && !pc.getHp_secondaries().isEmpty()) {
+          // Use FQDN secondaries
+          pc.getHp_secondaries()
+              .forEach(
+                  hpSecondary -> {
+                    try {
+                      rpc_address addr = hpSecondary.resolve();
+                      ReplicaSession session = tryConnect(addr, futureGroup);
+                      if (session != null) {
+                        replicaConfig.secondarySessions.add(session);
+                        logger.debug(
+                            "Connected to secondary using FQDN: {} -> {}",
+                            hpSecondary.toHostPortString(),
+                            addr);
+                      }
+                    } catch (PException e) {
+                      logger.warn(
+                          "Failed to resolve hp_secondary {}: {}",
+                          hpSecondary.toHostPortString(),
+                          e.getMessage());
+                    }
+                  });
+        } else if (!pc.getSecondaries().isEmpty()) {
+          // Fallback to legacy secondaries
+          pc.getSecondaries()
+              .forEach(
+                  secondary -> {
+                    ReplicaSession session = tryConnect(secondary, futureGroup);
+                    if (session != null) {
+                      replicaConfig.secondarySessions.add(session);
+                    }
+                  });
+        }
       }
     }
 
