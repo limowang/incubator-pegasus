@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #include "rpc/rpc_address.h"
@@ -73,6 +74,18 @@ DSN_DEFINE_int32(zookeeper,
                  timeout_ms,
                  30000,
                  "The timeout of accessing ZooKeeper, in milliseconds");
+DSN_DEFINE_int32(zookeeper,
+                 max_retry_attempts,
+                 5,
+                 "Maximum retry attempts for ZooKeeper connection failures");
+DSN_DEFINE_int32(zookeeper,
+                 retry_delay_ms,
+                 1000,
+                 "Initial delay between retry attempts in milliseconds");
+DSN_DEFINE_bool(zookeeper,
+                enable_exponential_backoff,
+                true,
+                "Enable exponential backoff for retry attempts");
 DSN_DEFINE_string(zookeeper, logfile, "zoo.log", "The path of the log file for ZooKeeper C client");
 DSN_DEFINE_string(zookeeper, zoo_log_level, "ZOO_LOG_LEVEL_INFO", "ZooKeeper log level");
 DSN_DEFINE_string(zookeeper, hosts_list, "", "ZooKeeper hosts list");
@@ -96,6 +109,10 @@ DSN_DEFINE_string(zookeeper,
                   "",
                   "If non-empty, specify the scheme in which the password is encrypted; "
                   "otherwise, the password is unencrypted plaintext");
+DSN_DEFINE_bool(zookeeper,
+                enable_sasl_recovery,
+                true,
+                "Enable automatic SASL authentication recovery mechanism");
 DSN_DEFINE_group_validator(enable_zookeeper_kerberos, [](std::string &message) -> bool {
     if (FLAGS_enable_zookeeper_kerberos &&
         !dsn::utils::equals(FLAGS_sasl_mechanisms_type, "GSSAPI")) {
@@ -410,7 +427,50 @@ void zookeeper_session::visit(zoo_opcontext *ctx)
 {
     ctx->_priv_session_ref = this;
 
+    // Critical fix: Handle null handle (e.g., after SASL failure recovery)
+    // This prevents segfault and enables automatic reconnection
+    if (_handle == nullptr) {
+        LOG_WARNING("Zookeeper handle is null (likely after SASL failure), attempting to reconnect...");
+
+        errno = 0;
+        _handle = create_zookeeper_handle(global_watcher, this);
+        if (_handle == nullptr) {
+            LOG_ERROR("Failed to recreate Zookeeper handle: {}", utils::safe_strerror(errno));
+            ctx->_output.error = ZSYSTEMERROR;
+            ctx->_callback_function(ctx);
+            release_ref(ctx);
+            return;
+        }
+
+        LOG_INFO("Zookeeper handle recreated successfully, SASL authentication will be re-attempted");
+        // Give the connection a moment to establish and authenticate
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
     if (zoo_state(_handle) != ZOO_CONNECTED_STATE) {
+        // Enhanced retry logic for connection issues
+        if (ctx->_retry_count < FLAGS_max_retry_attempts) {
+            ctx->_retry_count++;
+            int delay_ms = FLAGS_retry_delay_ms;
+
+            if (FLAGS_enable_exponential_backoff) {
+                delay_ms *= (1 << (ctx->_retry_count - 1)); // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+            }
+
+            LOG_WARNING("Zookeeper not connected (state: {}), retry attempt {}/{} after {}ms for operation on {}",
+                       string_zoo_state(zoo_state(_handle)), ctx->_retry_count, FLAGS_max_retry_attempts, delay_ms, *ctx->_input._path);
+
+            tasking::enqueue(
+                LPC_DEFAULT_CALLBACK,  // 使用通用的回调任务代码
+                nullptr,
+                [this, ctx]() { visit(ctx); },
+                0,
+                std::chrono::milliseconds(delay_ms));
+            return;
+        }
+
+        LOG_ERROR("Zookeeper connection failed after {} retry attempts for operation on {}",
+                  FLAGS_max_retry_attempts, *ctx->_input._path);
         ctx->_output.error = ZINVALIDSTATE;
         ctx->_callback_function(ctx);
         release_ref(ctx);
@@ -517,6 +577,40 @@ void zookeeper_session::global_watcher(
         "global watcher, type({}), state({})", string_zoo_event(type), string_zoo_state(state));
     if (type != ZOO_SESSION_EVENT && path != nullptr)
         LOG_INFO("watcher path: {}", path);
+
+    // Enhanced SASL authentication failure handling
+    if (type == ZOO_SESSION_EVENT && state == ZOO_AUTH_FAILED_STATE) {
+        LOG_ERROR("SASL authentication failed, attempting recovery...");
+
+        if (FLAGS_enable_sasl_recovery) {
+            // Schedule reconnection attempt after 5 seconds
+            tasking::enqueue(
+                LPC_DEFAULT_CALLBACK,  // 使用通用的回调任务代码
+                nullptr,
+                [zoo_session]() {
+                    LOG_INFO("Attempting to recover SASL authentication connection...");
+                    // Force reconnection by closing and reopening the handle
+                    if (zoo_session->_handle != nullptr) {
+                        zookeeper_close(zoo_session->_handle);
+                        zoo_session->_handle = nullptr;
+                        // New connection will be established on next operation
+                    }
+                },
+                0,
+                std::chrono::seconds(5));
+        } else {
+            LOG_ERROR("SASL authentication failed and recovery is disabled, manual intervention required");
+        }
+    }
+
+    // Handle expired sessions
+    if (type == ZOO_SESSION_EVENT && state == ZOO_EXPIRED_SESSION_STATE) {
+        LOG_WARNING("Zookeeper session expired, attempting to reconnect...");
+        if (zoo_session->_handle != nullptr) {
+            zookeeper_close(zoo_session->_handle);
+            zoo_session->_handle = nullptr;
+        }
+    }
 
     CHECK(zoo_session->_handle == handle, "");
     zoo_session->dispatch_event(type, state, type == ZOO_SESSION_EVENT ? "" : path);

@@ -140,6 +140,7 @@ public:
         // this are for implement usage, user shouldn't modify this directly
         zookeeper_session *_priv_session_ref;
         int32_t _ref_count;
+        int32_t _retry_count = 0; // Track retry attempts for connection failures
     };
 
     static zoo_opcontext *create_context()
@@ -155,6 +156,7 @@ public:
         result->_optype = ZOO_OPINVALID;
         result->_callback_function = nullptr;
         result->_priv_session_ref = nullptr;
+        result->_retry_count = 0;
 
         result->add_ref();
         return result;

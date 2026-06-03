@@ -1141,12 +1141,26 @@ void server_state::do_app_create(std::shared_ptr<app_state> &app)
                 init_app_partition_node(app, i, nullptr);
             }
         } else if (ERR_TIMEOUT == ec) {
-            LOG_WARNING("the storage service is not available currently, continue to create later");
-            tasking::enqueue(LPC_META_STATE_HIGH,
-                             tracker(),
-                             std::bind(&server_state::do_app_create, this, app),
-                             0,
-                             std::chrono::seconds(1));
+            // Simplified retry logic since Zookeeper session layer already handles retries
+            // This only triggers when Zookeeper session layer retries are exhausted
+            int retry_count = app->retry_count++;
+            int delay_seconds = 10; // Fixed 10s delay for persistent failures
+
+            LOG_WARNING("the storage service is not available currently (attempt {}/3), "
+                       "Zookeeper session retries exhausted, retry after {}s",
+                       retry_count + 1, delay_seconds);
+
+            // Simplified: only 3 retries with fixed delay, since session layer already retried 5 times
+            if (retry_count < 3) {
+                tasking::enqueue(LPC_META_STATE_HIGH,
+                                 tracker(),
+                                 std::bind(&server_state::do_app_create, this, app),
+                                 0,
+                                 std::chrono::seconds(delay_seconds));
+            } else {
+                LOG_ERROR("failed to create app({}) after Zookeeper session retries + {} meta-level retries",
+                          app->get_logname(), retry_count + 1);
+            }
         } else {
             CHECK(false, "we can't handle this right now, err({})", ec);
         }

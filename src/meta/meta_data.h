@@ -358,6 +358,7 @@ public:
     std::shared_ptr<app_state_helper> helpers;
     std::vector<partition_configuration> pcs;
     std::map<dupid_t, duplication_info_s_ptr> duplications;
+    int32_t retry_count = 0; // Track meta-level retry attempts (session layer retries already handled)
 
     static std::shared_ptr<app_state> create(const app_info &info);
     dsn::blob to_json(app_status::type temp_status)
