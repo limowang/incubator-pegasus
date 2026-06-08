@@ -278,7 +278,7 @@ bool verify_backup(const std::string& backup_dir, std::string& error_msg) {
     // Since we copy the entire replica directory, we need to check for rdb inside
     auto rdb_dir = dsn::utils::filesystem::path_combine(
         backup_dir,
-        "rdb"  // 注意：使用"rdb"而不是"rdb/data"，基于任务4的修正
+        "data/rdb"  // 正确的路径结构: replica_dir/data/rdb
     );
 
     if (!dsn::utils::filesystem::directory_exists(rdb_dir)) {
