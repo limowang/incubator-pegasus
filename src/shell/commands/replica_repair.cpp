@@ -604,6 +604,100 @@ bool repair_all_sst_files(const std::vector<std::string>& sst_files,
     return true;
 }
 
+// Add after repair_all_sst_files:
+bool create_new_database(const std::string& output_dir,
+                       const RepairConfig& config,
+                       rocksdb::DB** db,
+                       std::vector<rocksdb::ColumnFamilyHandle*>* cf_hdls,
+                       std::string& error_msg) {
+    fmt::print(stdout, "Creating new RocksDB database...\n");
+
+    auto rdb_dir = dsn::utils::filesystem::path_combine(
+        output_dir,
+        "rdb"  // 注意：使用"rdb"而不是"rdb/data"，基于任务4和8的修正
+    );
+
+    // Create directory structure
+    if (!dsn::utils::filesystem::directory_exists(rdb_dir)) {
+        if (!dsn::utils::filesystem::create_directory(rdb_dir)) {
+            error_msg = fmt::format("Failed to create directory: {}", rdb_dir);
+            return false;
+        }
+    }
+
+    rocksdb::DBOptions db_opts;
+    db_opts.create_if_missing = true;
+    db_opts.create_missing_column_families = true;
+
+    const std::vector<rocksdb::ColumnFamilyDescriptor> cf_dscs(
+        {{pegasus::server::meta_store::DATA_COLUMN_FAMILY_NAME, {}},
+         {pegasus::server::meta_store::META_COLUMN_FAMILY_NAME, {}}});
+
+    if (!open_rocksdb(db_opts, rdb_dir, false, cf_dscs, cf_hdls, db)) {
+        error_msg = "Failed to create new RocksDB database";
+        return false;
+    }
+
+    fmt::print(stdout, "New database created successfully\n");
+    return true;
+}
+
+// Add after create_new_database:
+bool import_repaired_sst_files(const std::string& output_dir,
+                               rocksdb::DB* db,
+                               std::vector<rocksdb::ColumnFamilyHandle*>* cf_hdls,
+                               std::string& error_msg) {
+    fmt::print(stdout, "Importing repaired SST files...\n");
+
+    auto rdb_dir = dsn::utils::filesystem::path_combine(
+        output_dir,
+        "rdb"  // 注意：使用"rdb"而不是"rdb/data"
+    );
+
+    // Collect repaired SST files
+    std::vector<std::string> repaired_sst_files;
+    std::vector<std::string> subdirs;
+
+    if (!dsn::utils::filesystem::get_subdirectories(rdb_dir, subdirs, false)) {
+        error_msg = "Failed to list subdirectories in output directory";
+        return false;
+    }
+
+    for (const auto& subdir : subdirs) {
+        std::vector<std::string> files;
+        if (!dsn::utils::filesystem::get_subfiles(subdir, files, false)) {
+            continue;
+        }
+
+        for (const auto& file : files) {
+            if (file.size() >= 4 && file.substr(file.size() - 4) == ".sst") {
+                repaired_sst_files.push_back(file);
+            }
+        }
+    }
+
+    if (repaired_sst_files.empty()) {
+        error_msg = "No repaired SST files found to import";
+        return false;
+    }
+
+    // Import files using IngestExternalFile
+    for (const auto& file : repaired_sst_files) {
+        rocksdb::IngestExternalFileArg arg;
+        arg.column_family = (*cf_hdls)[0]; // Data column family
+        arg.external_files.push_back(file);
+
+        rocksdb::Status status = db->IngestExternalFiles({arg});
+        if (!status.ok()) {
+            error_msg = fmt::format("Failed to import SST file {}: {}", file, status.ToString());
+            return false;
+        }
+    }
+
+    fmt::print(stdout, "Imported {} SST files\n", repaired_sst_files.size());
+    return true;
+}
+
 // Main command function
 bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     RepairConfig config;
@@ -742,7 +836,32 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
                stats.total_sst_files, stats.recovered_records, stats.skipped_records);
     fmt::print(stdout, "Corrupted files: {}\n", stats.corrupted_sst_files);
 
-    // Step 8: Cleanup backup on success
+    // Step 8: Create new database and import repaired SST files
+    rocksdb::DB* new_db = nullptr;
+    std::vector<rocksdb::ColumnFamilyHandle*> new_cf_hdls;
+
+    if (!create_new_database(config.output_dir, config, &new_db, &new_cf_hdls, error_msg)) {
+        fmt::print(stderr, "Error: {}\n", error_msg);
+        if (config.create_backup) {
+            rollback_to_backup(config.backup_dir, config.output_dir, error_msg);
+            cleanup_backup(config.backup_dir);
+        }
+        return false;
+    }
+
+    if (!import_repaired_sst_files(config.output_dir, new_db, &new_cf_hdls, error_msg)) {
+        fmt::print(stderr, "Error: {}\n", error_msg);
+        release_db(&new_cf_hdls, &new_db);
+        if (config.create_backup) {
+            rollback_to_backup(config.backup_dir, config.output_dir, error_msg);
+            cleanup_backup(config.backup_dir);
+        }
+        return false;
+    }
+
+    fmt::print(stdout, "New database created and SST files imported\n");
+
+    // Step 9: Cleanup backup on success
     if (config.create_backup) {
         cleanup_backup(config.backup_dir);
     }
