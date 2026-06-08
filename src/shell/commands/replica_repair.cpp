@@ -698,6 +698,74 @@ bool import_repaired_sst_files(const std::string& output_dir,
     return true;
 }
 
+// Add after import_repaired_sst_files:
+dsn::error_code write_metadata_files(const std::string& output_dir,
+                                     const dsn::app_info& app_info,
+                                     const dsn::replication::replica_init_info& init_info,
+                                     uint64_t last_decree,
+                                     std::string& error_msg) {
+    fmt::print(stdout, "Generating metadata files...\n");
+
+    // Generate .app-info file
+    dsn::app_info new_ai(app_info);
+    dsn::replication::replica_app_info rai(&new_ai);
+    const auto rai_path = dsn::utils::filesystem::path_combine(
+        output_dir, dsn::replication::replica_app_info::kAppInfo);
+
+    auto err = rai.store(rai_path);
+    if (err != dsn::ERR_OK) {
+        error_msg = fmt::format("Failed to write app-info to {}", rai_path);
+        return err;
+    }
+
+    fmt::print(stdout, "  ✓ Generated .app-info\n");
+
+    // Generate .init-info file
+    dsn::replication::replica_init_info new_rii(init_info);
+    if (last_decree > 0) {
+        new_rii.init_durable_decree = last_decree;
+    }
+    const auto rii_path = dsn::utils::filesystem::path_combine(
+        output_dir, dsn::replication::replica_init_info::kInitInfo);
+
+    err = dsn::utils::dump_rjobj_to_file(new_rii, rii_path);
+    if (err != dsn::ERR_OK) {
+        error_msg = fmt::format("Failed to write init-info to {}", rii_path);
+        return err;
+    }
+
+    fmt::print(stdout, "  ✓ Generated .init-info\n");
+    return dsn::ERR_OK;
+}
+
+// Add after write_metadata_files:
+bool set_rocksdb_metadata(rocksdb::DB* db,
+                         std::vector<rocksdb::ColumnFamilyHandle*>* cf_hdls,
+                         uint32_t pegasus_data_version,
+                         uint64_t last_decree,
+                         std::string& error_msg) {
+    fmt::print(stdout, "Setting RocksDB metadata...\n");
+
+    auto rdb_dir = db->GetName(); // Get the DB directory path
+    auto ms = std::make_unique<pegasus::server::meta_store>(rdb_dir.c_str(), db, (*cf_hdls)[1]);
+
+    // Set data version and last flushed decree (these methods return void)
+    ms->set_data_version(pegasus_data_version);
+    ms->set_last_flushed_decree(last_decree);
+
+    // Flush to ensure persistence
+    rocksdb::FlushOptions flush_opts;
+    flush_opts.wait = true;
+    rocksdb::Status status = db->Flush(flush_opts, *cf_hdls);
+    if (!status.ok()) {
+        error_msg = fmt::format("Failed to flush database: {}", status.ToString());
+        return false;
+    }
+
+    fmt::print(stdout, "  ✓ Metadata set and flushed\n");
+    return true;
+}
+
 // Main command function
 bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     RepairConfig config;
@@ -861,7 +929,35 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
 
     fmt::print(stdout, "New database created and SST files imported\n");
 
-    // Step 9: Cleanup backup on success
+    // Step 9: Set RocksDB metadata
+    if (!set_rocksdb_metadata(new_db, &new_cf_hdls, pegasus_data_version,
+                              last_committed_decree, error_msg)) {
+        fmt::print(stderr, "Error: {}\n", error_msg);
+        release_db(&new_cf_hdls, &new_db);
+        if (config.create_backup) {
+            rollback_to_backup(config.backup_dir, config.output_dir, error_msg);
+            cleanup_backup(config.backup_dir);
+        }
+        return false;
+    }
+
+    // Close database before writing files
+    release_db(&new_cf_hdls, &new_db);
+
+    // Step 10: Write metadata files
+    if (!write_metadata_files(config.output_dir, app_info, init_info,
+                             last_committed_decree, error_msg)) {
+        fmt::print(stderr, "Error: {}\n", error_msg);
+        if (config.create_backup) {
+            rollback_to_backup(config.backup_dir, config.output_dir, error_msg);
+            cleanup_backup(config.backup_dir);
+        }
+        return false;
+    }
+
+    fmt::print(stdout, "Metadata files generated successfully\n");
+
+    // Step 11: Cleanup backup on success
     if (config.create_backup) {
         cleanup_backup(config.backup_dir);
     }
