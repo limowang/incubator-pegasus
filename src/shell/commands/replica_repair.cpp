@@ -278,6 +278,32 @@ bool verify_backup(const std::string& backup_dir, std::string& error_msg) {
     return true;
 }
 
+// Add after verify_backup:
+bool rollback_to_backup(const std::string& backup_dir, const std::string& output_dir, std::string& error_msg) {
+    fmt::print(stdout, "Rolling back to backup...\n");
+
+    // Remove failed repair attempt
+    if (dsn::utils::filesystem::directory_exists(output_dir)) {
+        if (!dsn::utils::filesystem::remove_path(output_dir)) {
+            error_msg = fmt::format("Failed to remove failed repair directory: {}", output_dir);
+            return false;
+        }
+    }
+
+    fmt::print(stdout, "Rollback completed\n");
+    return true;
+}
+
+// Add after rollback_to_backup:
+bool cleanup_backup(const std::string& backup_dir) {
+    if (backup_dir.empty() || !dsn::utils::filesystem::directory_exists(backup_dir)) {
+        return true; // Nothing to cleanup
+    }
+
+    fmt::print(stdout, "Cleaning up backup: {}\n", backup_dir);
+    return dsn::utils::filesystem::remove_path(backup_dir);
+}
+
 // Main command function
 bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     RepairConfig config;
