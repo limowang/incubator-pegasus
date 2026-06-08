@@ -415,6 +415,7 @@ extern void release_db(std::vector<rocksdb::ColumnFamilyHandle*>* cf_hdls, rocks
 bool read_rocksdb_metadata(const std::string& rdb_dir,
                           uint64_t& last_committed_decree,
                           uint32_t& pegasus_data_version,
+                          uint64_t& last_manual_compact_finish_time,
                           std::string& error_msg) {
     rocksdb::DBOptions db_opts;
     const std::vector<rocksdb::ColumnFamilyDescriptor> cf_dscs(
@@ -441,6 +442,12 @@ bool read_rocksdb_metadata(const std::string& rdb_dir,
     if (ret && ms->get_data_version(&pegasus_data_version) != dsn::ERR_OK) {
         error_msg = "Failed to get data version";
         ret = false;
+    }
+
+    if (ret && ms->get_last_manual_compact_finish_time(&last_manual_compact_finish_time) != dsn::ERR_OK) {
+        error_msg = "Failed to get last manual compact finish time";
+        // 非关键元数据，不返回错误
+        last_manual_compact_finish_time = 0;
     }
 
     release_db(&cf_hdls, &db);
@@ -748,15 +755,17 @@ bool set_rocksdb_metadata(rocksdb::DB* db,
                          std::vector<rocksdb::ColumnFamilyHandle*>* cf_hdls,
                          uint32_t pegasus_data_version,
                          uint64_t last_decree,
+                         uint64_t last_manual_compact_finish_time,
                          std::string& error_msg) {
     fmt::print(stdout, "Setting RocksDB metadata...\n");
 
     auto rdb_dir = db->GetName(); // Get the DB directory path
     auto ms = std::make_unique<pegasus::server::meta_store>(rdb_dir.c_str(), db, (*cf_hdls)[1]);
 
-    // Set data version and last flushed decree (these methods return void)
+    // Set data version, last flushed decree, and last manual compact finish time
     ms->set_data_version(pegasus_data_version);
     ms->set_last_flushed_decree(last_decree);
+    ms->set_last_manual_compact_finish_time(last_manual_compact_finish_time);
 
     // Flush to ensure persistence
     rocksdb::FlushOptions flush_opts;
@@ -860,10 +869,13 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     );
 
     uint64_t last_committed_decree = 0;
-    uint32_t pegasus_data_version = 0;
+    uint32_t pegasus_data_version = 1;  // 默认版本1
+    uint64_t last_manual_compact_finish_time = 0;
 
     bool rocksdb_readable = read_rocksdb_metadata(rdb_dir, last_committed_decree,
-                                                  pegasus_data_version, error_msg);
+                                                  pegasus_data_version,
+                                                  last_manual_compact_finish_time,
+                                                  error_msg);
     if (rocksdb_readable) {
         fmt::print(stdout, "RocksDB metadata: last_decree={}, data_version={}\n",
                    last_committed_decree, pegasus_data_version);
@@ -936,7 +948,8 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
 
     // Step 9: Set RocksDB metadata
     if (!set_rocksdb_metadata(new_db, &new_cf_hdls, pegasus_data_version,
-                              last_committed_decree, error_msg)) {
+                              last_committed_decree, last_manual_compact_finish_time,
+                              error_msg)) {
         fmt::print(stderr, "Error: {}\n", error_msg);
         release_db(&new_cf_hdls, &new_db);
         if (config.create_backup) {
