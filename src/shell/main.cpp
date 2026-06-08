@@ -664,6 +664,14 @@ static command_executor commands[] = {
         local_partition_split,
     },
     {
+        "repair_replica",
+        "Repair corrupted Pegasus replicas by rebuilding from SST files",
+        "<gpid> <replica_dir> <output_dir> [--backup_dir path] [--no_backup] "
+        "[--report_file path] [--dry_run] [--skip_corrupted_records] "
+        "[--max_corrupted_ratio ratio] [--verify_repair] [--help]",
+        repair_replica,
+    },
+    {
         "exit",
         "exit shell",
         "",
