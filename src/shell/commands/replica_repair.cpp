@@ -213,7 +213,7 @@ bool validate_directories(const RepairConfig& config, std::string& error_msg) {
     // Check if replica directory has the expected structure
     auto rdb_dir = dsn::utils::filesystem::path_combine(
         config.replica_dir,
-        "rdb"
+        "data/rdb"
     );
 
     if (!dsn::utils::filesystem::directory_exists(rdb_dir)) {
