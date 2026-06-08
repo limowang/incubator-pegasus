@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -93,6 +94,10 @@ struct RepairResult {
     std::string backup_path;
     bool verification_passed = false;
 };
+
+// Forward declarations for new functions
+bool verify_repaired_replica(const std::string& output_dir, RepairResult& result, std::string& error_msg);
+void generate_json_report(const RepairConfig& config, const RepairResult& result, const std::string& report_file);
 
 // Add before the repair_replica function:
 bool parse_arguments(arguments args, RepairConfig& config, std::string& error_msg) {
@@ -962,6 +967,141 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
         cleanup_backup(config.backup_dir);
     }
 
+    // Step 12: Verify repaired replica (if requested)
+    RepairResult result;
+    result.success = true;
+    result.stats = stats;
+    result.backup_path = config.backup_dir;
+
+    if (config.verify_repair) {
+        fmt::print(stdout, "\n=== Verifying repaired replica ===\n");
+        if (!verify_repaired_replica(config.output_dir, result, error_msg)) {
+            result.warnings.push_back("Verification failed: " + error_msg);
+            result.verification_passed = false;
+        } else {
+            result.verification_passed = true;
+            fmt::print(stdout, "Verification passed\n");
+        }
+    }
+
+    // Step 13: Generate JSON report (if requested)
+    if (!config.report_file.empty()) {
+        generate_json_report(config, result, config.report_file);
+    }
+
     fmt::print(stdout, "SUCCESS: Replica repair completed!\n");
     return true;
+}
+
+// Task 13: Verify repaired replica
+bool verify_repaired_replica(const std::string& output_dir, RepairResult& result, std::string& error_msg) {
+    fmt::print(stdout, "Opening repaired database for verification...\n");
+
+    auto rdb_dir = dsn::utils::filesystem::path_combine(output_dir, "rdb");
+
+    // Try to open the database
+    rocksdb::DBOptions db_opts;
+    const std::vector<rocksdb::ColumnFamilyDescriptor> cf_dscs(
+        {{pegasus::server::meta_store::DATA_COLUMN_FAMILY_NAME, {}},
+         {pegasus::server::meta_store::META_COLUMN_FAMILY_NAME, {}}});
+
+    std::vector<rocksdb::ColumnFamilyHandle*> cf_hdls;
+    rocksdb::DB* db = nullptr;
+
+    if (!open_rocksdb(db_opts, rdb_dir, true, cf_dscs, &cf_hdls, &db)) {
+        error_msg = "Failed to open repaired database for verification";
+        return false;
+    }
+
+    // Verify metadata consistency
+    auto ms = std::make_unique<pegasus::server::meta_store>(rdb_dir.c_str(), db, cf_hdls[1]);
+
+    uint64_t last_decree = 0;
+    uint32_t data_version = 0;
+
+    bool metadata_ok = true;
+    if (ms->get_last_flushed_decree(&last_decree) != dsn::ERR_OK) {
+        result.warnings.push_back("Could not read last flushed decree during verification");
+        metadata_ok = false;
+    }
+
+    if (ms->get_data_version(&data_version) != dsn::ERR_OK) {
+        result.warnings.push_back("Could not read data version during verification");
+        metadata_ok = false;
+    }
+
+    release_db(&cf_hdls, &db);
+
+    if (metadata_ok) {
+        fmt::print(stdout, "  ✓ Metadata verified: decree={}, version={}\n", last_decree, data_version);
+    }
+
+    // Verify metadata files exist
+    auto app_info_path = dsn::utils::filesystem::path_combine(
+        output_dir, dsn::replication::replica_app_info::kAppInfo);
+    auto init_info_path = dsn::utils::filesystem::path_combine(
+        output_dir, dsn::replication::replica_init_info::kInitInfo);
+
+    if (!dsn::utils::filesystem::file_exists(app_info_path)) {
+        result.warnings.push_back("Missing .app-info file");
+        metadata_ok = false;
+    }
+
+    if (!dsn::utils::filesystem::file_exists(init_info_path)) {
+        result.warnings.push_back("Missing .init-info file");
+        metadata_ok = false;
+    }
+
+    if (metadata_ok) {
+        fmt::print(stdout, "  ✓ Metadata files present\n");
+    }
+
+    return metadata_ok;
+}
+
+// Task 14: Generate JSON report
+void generate_json_report(const RepairConfig& config, const RepairResult& result, const std::string& report_file) {
+    fmt::print(stdout, "Generating JSON report: {}\n", report_file);
+
+    // Build JSON manually (simple approach without external library)
+    std::string json = "{\n";
+    json += "  \"success\": " + std::string(result.success ? "true" : "false") + ",\n";
+    json += "  \"verification_passed\": " + std::string(result.verification_passed ? "true" : "false") + ",\n";
+    json += "  \"gpid\": \"" + std::to_string(config.app_id) + "." + std::to_string(config.partition_id) + "\",\n";
+    json += "  \"replica_dir\": \"" + config.replica_dir + "\",\n";
+    json += "  \"output_dir\": \"" + config.output_dir + "\",\n";
+    json += "  \"backup_path\": \"" + result.backup_path + "\",\n";
+
+    // Statistics
+    json += "  \"statistics\": {\n";
+    json += "    \"total_sst_files\": " + std::to_string(result.stats.total_sst_files) + ",\n";
+    json += "    \"corrupted_sst_files\": " + std::to_string(result.stats.corrupted_sst_files) + ",\n";
+    json += "    \"total_records\": " + std::to_string(result.stats.total_records) + ",\n";
+    json += "    \"recovered_records\": " + std::to_string(result.stats.recovered_records) + ",\n";
+    json += "    \"skipped_records\": " + std::to_string(result.stats.skipped_records) + ",\n";
+    json += "    \"data_size_bytes\": " + std::to_string(result.stats.data_size_bytes) + ",\n";
+    json += "    \"duration_seconds\": " + std::to_string(result.stats.duration_seconds) + "\n";
+    json += "  },\n";
+
+    // Warnings
+    json += "  \"warnings\": [";
+    for (size_t i = 0; i < result.warnings.size(); i++) {
+        if (i > 0) json += ", ";
+        json += "\"" + result.warnings[i] + "\"";
+    }
+    json += "],\n";
+
+    // Error message (if any)
+    json += "  \"error_message\": \"" + result.error_message + "\"\n";
+    json += "}\n";
+
+    // Write to file
+    std::ofstream out(report_file);
+    if (out.is_open()) {
+        out << json;
+        out.close();
+        fmt::print(stdout, "  ✓ JSON report written\n");
+    } else {
+        fmt::print(stderr, "  ✗ Failed to write JSON report to {}\n", report_file);
+    }
 }
