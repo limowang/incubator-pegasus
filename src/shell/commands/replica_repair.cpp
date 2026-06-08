@@ -373,7 +373,7 @@ bool discover_sst_files(const std::string& replica_dir,
                        std::string& error_msg) {
     auto rdb_dir = dsn::utils::filesystem::path_combine(
         replica_dir,
-        "rdb"  // 注意：使用"rdb"而不是"rdb/data"，基于任务4的修正
+        "data/rdb"  // 正确的路径结构: replica_dir/data/rdb
     );
 
     // Get all subdirectories (should be numbered like 000001, 000002, etc.)
