@@ -38,6 +38,7 @@
 #include "utils/error_code.h"
 #include "utils/filesystem.h"
 #include "utils/fmt_logging.h"
+#include "utils/load_dump_object.h"
 
 
 const std::string repair_replica_help =
@@ -304,6 +305,57 @@ bool cleanup_backup(const std::string& backup_dir) {
     return dsn::utils::filesystem::remove_path(backup_dir);
 }
 
+// Add after cleanup_backup:
+dsn::error_code load_metadata_from_replica(const std::string& replica_dir,
+                                         dsn::app_info& app_info,
+                                         dsn::replication::replica_init_info& init_info,
+                                         std::string& error_msg) {
+    // Try to load .app-info
+    auto app_info_path = dsn::utils::filesystem::path_combine(
+        replica_dir, dsn::replication::replica_app_info::kAppInfo);
+
+    auto err = dsn::utils::load_rjobj_from_file(app_info_path, &app_info);
+    if (err == dsn::ERR_OK) {
+        fmt::print(stdout, "Loaded app_info from {}\n", app_info_path);
+    } else {
+        fmt::print(stdout, "WARNING: Could not load app_info from {} (error: {}). Will use defaults.\n",
+                   app_info_path, err);
+    }
+
+    // Try to load .init-info
+    auto init_info_path = dsn::utils::filesystem::path_combine(
+        replica_dir, dsn::replication::replica_init_info::kInitInfo);
+
+    err = dsn::utils::load_rjobj_from_file(init_info_path, &init_info);
+    if (err == dsn::ERR_OK) {
+        fmt::print(stdout, "Loaded init_info from {}\n", init_info_path);
+    } else {
+        fmt::print(stdout, "WARNING: Could not load init_info from {} (error: {}). Will use defaults.\n",
+                   init_info_path, err);
+    }
+
+    return dsn::ERR_OK;
+}
+
+dsn::error_code generate_default_metadata(const RepairConfig& config,
+                                         dsn::app_info& app_info,
+                                         dsn::replication::replica_init_info& init_info) {
+    // Set default app_info
+    app_info.app_id = config.app_id;
+    app_info.app_name = fmt::format("app_{}", config.app_id);
+    app_info.app_type = "pegasus";
+    app_info.partition_count = 1; // Will be updated from actual data if available
+    app_info.status = dsn::app_status::AS_AVAILABLE;
+
+    // Set default init_info
+    init_info.init_ballot = 0;
+    init_info.init_durable_decree = 0;
+    init_info.init_offset_in_shared_log = 0;
+    init_info.init_offset_in_private_log = 0;
+
+    return dsn::ERR_OK;
+}
+
 // Main command function
 bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     RepairConfig config;
@@ -353,6 +405,18 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     } else {
         fmt::print(stdout, "WARNING: Backup creation is disabled (NOT recommended)\n");
     }
+
+    // Step 3: Load metadata
+    dsn::app_info app_info;
+    dsn::replication::replica_init_info init_info;
+
+    load_metadata_from_replica(config.replica_dir, app_info, init_info, error_msg);
+
+    // Ensure we have at least default values
+    generate_default_metadata(config, app_info, init_info);
+
+    fmt::print(stdout, "App ID: {}, App Name: {}, Partition Count: {}\n",
+               app_info.app_id, app_info.app_name, app_info.partition_count);
 
     return true;
 }
