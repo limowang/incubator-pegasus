@@ -626,7 +626,7 @@ bool create_new_database(const std::string& output_dir,
 
     auto rdb_dir = dsn::utils::filesystem::path_combine(
         output_dir,
-        "rdb"  // 注意：使用"rdb"而不是"rdb/data"，基于任务4和8的修正
+        "data/rdb"  // 注意：使用"data/rdb"路径
     );
 
     // Create directory structure
@@ -663,7 +663,7 @@ bool import_repaired_sst_files(const std::string& output_dir,
 
     auto rdb_dir = dsn::utils::filesystem::path_combine(
         output_dir,
-        "rdb"  // 注意：使用"rdb"而不是"rdb/data"
+        "data/rdb"  // 注意：使用"data/rdb"而不是"rdb"
     );
 
     // Collect repaired SST files
