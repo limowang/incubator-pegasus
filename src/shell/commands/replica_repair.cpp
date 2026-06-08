@@ -79,10 +79,118 @@ struct RepairResult {
     bool verification_passed = false;
 };
 
+// Add before the repair_replica function:
+bool parse_arguments(arguments args, RepairConfig& config, std::string& error_msg) {
+    // Need at least: gpid replica_dir output_dir
+    if (args.argc < 4) {
+        error_msg = fmt::format("Insufficient arguments. Usage: {}\n", repair_replica_help);
+        return false;
+    }
+
+    // Parse gpid (format: app_id.partition_id)
+    std::string gpid_str = args.argv[1];
+    if (sscanf(gpid_str.c_str(), "%d.%d", &config.app_id, &config.partition_id) != 2) {
+        error_msg = fmt::format("Invalid GPID format: {}. Expected: app_id.partition_id\n", gpid_str);
+        return false;
+    }
+
+    config.replica_dir = args.argv[2];
+    config.output_dir = args.argv[3];
+
+    // Parse optional arguments
+    for (int i = 4; i < args.argc; i++) {
+        std::string arg = args.argv[i];
+
+        if (arg == "--help" || arg == "-h") {
+            fmt::print(stdout, "Usage: {}\n", repair_replica_help);
+            fmt::print(stdout, "\nOptions:\n");
+            fmt::print(stdout, "  --backup_dir <path>     Backup directory (auto-generated if not specified)\n");
+            fmt::print(stdout, "  --no_backup              Skip backup creation (NOT recommended)\n");
+            fmt::print(stdout, "  --report_file <path>     JSON report file path\n");
+            fmt::print(stdout, "  --dry_run                Diagnose only without actual repair\n");
+            fmt::print(stdout, "  --skip_corrupted_records Skip corrupted records and continue\n");
+            fmt::print(stdout, "  --max_corrupted_ratio    Maximum corrupted file ratio (0.0-1.0, default: 0.5)\n");
+            fmt::print(stdout, "  --verify_repair           Verify repaired replica (default: true)\n");
+            return false;
+        }
+
+        if (arg == "--no_backup") {
+            config.create_backup = false;
+        } else if (arg == "--dry_run") {
+            config.dry_run = true;
+        } else if (arg == "--skip_corrupted_records") {
+            config.skip_corrupted = true;
+        } else if (arg == "--verify_repair") {
+            config.verify_repair = true;
+        } else if (arg == "--backup_dir") {
+            if (i + 1 < args.argc) {
+                config.backup_dir = args.argv[++i];
+            } else {
+                error_msg = "--backup_dir requires a path argument";
+                return false;
+            }
+        } else if (arg == "--report_file") {
+            if (i + 1 < args.argc) {
+                config.report_file = args.argv[++i];
+            } else {
+                error_msg = "--report_file requires a path argument";
+                return false;
+            }
+        } else if (arg == "--max_corrupted_ratio") {
+            if (i + 1 < args.argc) {
+                try {
+                    config.max_corrupted_ratio = std::stod(args.argv[++i]);
+                    if (config.max_corrupted_ratio < 0.0 || config.max_corrupted_ratio > 1.0) {
+                        error_msg = "max_corrupted_ratio must be between 0.0 and 1.0";
+                        return false;
+                    }
+                } catch (...) {
+                    error_msg = "Invalid max_corrupted_ratio value";
+                    return false;
+                }
+            } else {
+                error_msg = "--max_corrupted_ratio requires a numeric value";
+                return false;
+            }
+        } else {
+            error_msg = fmt::format("Unknown argument: {}", arg);
+            return false;
+        }
+    }
+
+    // Auto-generate backup dir if not specified and backup is enabled
+    if (config.create_backup && config.backup_dir.empty()) {
+        config.backup_dir = fmt::format("/tmp/replica_backup_{}.{}.{}",
+                                        config.app_id, config.partition_id,
+                                        std::chrono::system_clock::now().time_since_epoch().count());
+    }
+
+    return true;
+}
+
 // Main command function
 bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
-    fmt::print(stdout, "Replica repair tool - not yet implemented\n");
-    fmt::print(stdout, "GPID: {}, Replica: {}, Output: {}\n",
-               args.argv[1], args.argv[2], args.argv[3]);
+    RepairConfig config;
+    std::string error_msg;
+
+    if (!parse_arguments(args, config, error_msg)) {
+        if (error_msg.empty() || error_msg.find("Usage:") != std::string::npos) {
+            // Help was requested or parsing info
+            return error_msg.empty();
+        }
+        fmt::print(stderr, "Error: {}\n", error_msg);
+        return false;
+    }
+
+    // Display parsed configuration
+    fmt::print(stdout, "Replica Repair Configuration:\n");
+    fmt::print(stdout, "  GPID: {}.{}\n", config.app_id, config.partition_id);
+    fmt::print(stdout, "  Replica Dir: {}\n", config.replica_dir);
+    fmt::print(stdout, "  Output Dir: {}\n", config.output_dir);
+    fmt::print(stdout, "  Backup Dir: {}\n", config.backup_dir.empty() ? "(none, backup disabled)" : config.backup_dir);
+    fmt::print(stdout, "  Dry Run: {}\n", config.dry_run ? "yes" : "no");
+    fmt::print(stdout, "  Skip Corrupted: {}\n", config.skip_corrupted ? "yes" : "no");
+    fmt::print(stdout, "  Max Corrupted Ratio: {}\n", config.max_corrupted_ratio);
+
     return true;
 }
