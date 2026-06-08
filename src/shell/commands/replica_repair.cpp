@@ -881,7 +881,7 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     // Step 5: Try to read metadata from RocksDB (if possible)
     auto rdb_dir = dsn::utils::filesystem::path_combine(
         config.replica_dir,
-        "rdb"  // 注意：使用"rdb"而不是"rdb/data"，基于任务4和8的修正
+        "data/rdb"  // 修复：使用"data/rdb"路径
     );
 
     uint64_t last_committed_decree = 0;
@@ -1026,7 +1026,7 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
 bool verify_repaired_replica(const std::string& output_dir, RepairResult& result, std::string& error_msg) {
     fmt::print(stdout, "Opening repaired database for verification...\n");
 
-    auto rdb_dir = dsn::utils::filesystem::path_combine(output_dir, "rdb");
+    auto rdb_dir = dsn::utils::filesystem::path_combine(output_dir, "data/rdb");
 
     // Try to open the database
     rocksdb::DBOptions db_opts;
