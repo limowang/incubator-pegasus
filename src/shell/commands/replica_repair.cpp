@@ -390,6 +390,52 @@ bool discover_sst_files(const std::string& replica_dir,
     return true;
 }
 
+
+// External function declarations from local_partition_split.cpp
+extern bool open_rocksdb(const rocksdb::DBOptions& db_opts,
+                        const std::string& rdb_dir,
+                        bool read_only,
+                        const std::vector<rocksdb::ColumnFamilyDescriptor>& cf_dscs,
+                        std::vector<rocksdb::ColumnFamilyHandle*>* cf_hdls,
+                        rocksdb::DB** db);
+extern void release_db(std::vector<rocksdb::ColumnFamilyHandle*>* cf_hdls, rocksdb::DB** db);
+
+// Add after release_db:
+bool read_rocksdb_metadata(const std::string& rdb_dir,
+                          uint64_t& last_committed_decree,
+                          uint32_t& pegasus_data_version,
+                          std::string& error_msg) {
+    rocksdb::DBOptions db_opts;
+    const std::vector<rocksdb::ColumnFamilyDescriptor> cf_dscs(
+        {{pegasus::server::meta_store::DATA_COLUMN_FAMILY_NAME, {}},
+         {pegasus::server::meta_store::META_COLUMN_FAMILY_NAME, {}}});
+
+    std::vector<rocksdb::ColumnFamilyHandle*> cf_hdls;
+    rocksdb::DB* db = nullptr;
+
+    if (!open_rocksdb(db_opts, rdb_dir, true, cf_dscs, &cf_hdls, &db)) {
+        error_msg = "Failed to open RocksDB in read-only mode";
+        return false;
+    }
+
+    // Use meta_store to read metadata
+    auto ms = std::make_unique<pegasus::server::meta_store>(rdb_dir.c_str(), db, cf_hdls[1]);
+
+    bool ret = true;
+    if (ms->get_last_flushed_decree(&last_committed_decree) != dsn::ERR_OK) {
+        error_msg = "Failed to get last flushed decree";
+        ret = false;
+    }
+
+    if (ret && ms->get_data_version(&pegasus_data_version) != dsn::ERR_OK) {
+        error_msg = "Failed to get data version";
+        ret = false;
+    }
+
+    release_db(&cf_hdls, &db);
+    return ret;
+}
+
 // Main command function
 bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     RepairConfig config;
@@ -471,6 +517,27 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     }
 
     fmt::print(stdout, "SST file discovery completed\n");
+
+    // Step 5: Try to read metadata from RocksDB (if possible)
+    auto rdb_dir = dsn::utils::filesystem::path_combine(
+        config.replica_dir,
+        "rdb"  // 注意：使用"rdb"而不是"rdb/data"，基于任务4和8的修正
+    );
+
+    uint64_t last_committed_decree = 0;
+    uint32_t pegasus_data_version = 0;
+
+    bool rocksdb_readable = read_rocksdb_metadata(rdb_dir, last_committed_decree,
+                                                  pegasus_data_version, error_msg);
+    if (rocksdb_readable) {
+        fmt::print(stdout, "RocksDB metadata: last_decree={}, data_version={}\n",
+                   last_committed_decree, pegasus_data_version);
+        // Update init_info with actual decree
+        init_info.init_durable_decree = last_committed_decree;
+    } else {
+        fmt::print(stdout, "INFO: Could not read RocksDB metadata (expected if corrupted): {}\n",
+                   error_msg);
+    }
 
     fmt::print(stdout, "SUCCESS: All checks passed!\n");
     return true;
