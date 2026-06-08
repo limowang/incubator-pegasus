@@ -22,6 +22,10 @@
 #include <rocksdb/db.h>
 #include <rocksdb/env.h>
 #include <rocksdb/options.h>
+#include <rocksdb/sst_file_reader.h>
+#include <rocksdb/sst_file_writer.h>
+#include <rocksdb/iterator.h>
+#include <rocksdb/table_properties.h>
 #include <stdio.h>
 #include <algorithm>
 #include <chrono>
@@ -30,6 +34,7 @@
 #include <vector>
 
 #include "base/meta_store.h"
+#include "base/pegasus_key_schema.h"
 #include "common/gpid.h"
 #include "dsn.layer2_types.h"
 #include "replica/replication_app_base.h"
@@ -39,6 +44,7 @@
 #include "utils/filesystem.h"
 #include "utils/fmt_logging.h"
 #include "utils/load_dump_object.h"
+#include "utils/blob.h"
 
 
 const std::string repair_replica_help =
@@ -436,6 +442,168 @@ bool read_rocksdb_metadata(const std::string& rdb_dir,
     return ret;
 }
 
+// Add after read_rocksdb_metadata, using local_partition_split pattern:
+bool repair_sst_file(const std::string& src_sst,
+                    const std::string& dst_sst,
+                    const RepairConfig& config,
+                    int64_t& records_recovered,
+                    int64_t& records_skipped,
+                    std::string& error_msg) {
+    fmt::print(stdout, "  Processing: {}\n", src_sst);
+
+    // 1. Open reader
+    auto reader = std::make_unique<rocksdb::SstFileReader>(rocksdb::Options());
+    rocksdb::Status status = reader->Open(src_sst);
+
+    if (!status.ok()) {
+        error_msg = fmt::format("Failed to open SST file: {}", status.ToString());
+        return false;
+    }
+
+    // 2. Verify checksum
+    status = reader->VerifyChecksum();
+    if (!status.ok()) {
+        error_msg = fmt::format("Checksum verification failed: {}", status.ToString());
+        if (!config.skip_corrupted) {
+            return false;
+        }
+        fmt::print(stdout, "  ✗ Checksum failed - skipping file\n");
+        return false;
+    }
+
+    // 3. Check table properties
+    auto tbl_ppts = reader->GetTableProperties();
+    if (!tbl_ppts) {
+        error_msg = "Failed to get table properties";
+        return false;
+    }
+
+    // Skip if this is metadata column family file
+    if (tbl_ppts->column_family_name == pegasus::server::meta_store::META_COLUMN_FAMILY_NAME) {
+        fmt::print(stdout, "  ⊘ Metadata CF file - skipping\n");
+        return true; // Not an error, just skip
+    }
+
+    // 4. Create writer for repaired file
+    auto writer = std::make_shared<rocksdb::SstFileWriter>(
+        rocksdb::EnvOptions(), rocksdb::Options());
+
+    // Extract directory from destination path
+    std::string dst_dir = dst_sst.substr(0, dst_sst.find_last_of('/'));
+    if (dst_dir.empty()) {
+        dst_dir = ".";
+    }
+
+    if (!dsn::utils::filesystem::directory_exists(dst_dir)) {
+        if (!dsn::utils::filesystem::create_directory(dst_dir)) {
+            error_msg = fmt::format("Failed to create directory: {}", dst_dir);
+            return false;
+        }
+    }
+
+    status = writer->Open(dst_sst);
+    if (!status.ok()) {
+        error_msg = fmt::format("Failed to create SST writer: {}", status.ToString());
+        return false;
+    }
+
+    // 5. Iterate through records
+    std::unique_ptr<rocksdb::Iterator> iter(reader->NewIterator({}));
+    int64_t recovered = 0;
+    int64_t skipped = 0;
+
+    for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+        const auto& key = iter->key();
+        const auto& value = iter->value();
+
+        // Skip empty writes (from local_partition_split pattern)
+        if (key.empty() && value.empty()) {
+            skipped++;
+            continue;
+        }
+
+        // Write valid record
+        status = writer->Put(key, value);
+        if (!status.ok()) {
+            error_msg = fmt::format("Failed to write record: {}", status.ToString());
+            skipped++;
+            if (!config.skip_corrupted) {
+                writer->Finish(nullptr);
+                return false;
+            }
+            continue;
+        }
+
+        recovered++;
+    }
+
+    // 6. Finalize writer
+    status = writer->Finish(nullptr);
+    if (!status.ok()) {
+        error_msg = fmt::format("Failed to finalize SST file: {}", status.ToString());
+        return false;
+    }
+
+    records_recovered = recovered;
+    records_skipped = skipped;
+
+    fmt::print(stdout, "  ✓ Recovered: {}, Skipped: {}\n", recovered, skipped);
+    return true;
+}
+
+// Add after repair_sst_file:
+bool repair_all_sst_files(const std::vector<std::string>& sst_files,
+                         const std::string& output_dir,
+                         const RepairConfig& config,
+                         RepairStats& stats,
+                         std::string& error_msg) {
+    fmt::print(stdout, "\nRepairing SST files...\n");
+
+    int64_t total_recovered = 0;
+    int64_t total_skipped = 0;
+    int64_t corrupted_count = 0;
+
+    for (size_t i = 0; i < sst_files.size(); i++) {
+        const auto& src_file = sst_files[i];
+
+        // Generate destination path (preserve structure)
+        std::string relative_path = src_file.substr(config.replica_dir.size());
+        std::string dst_file = output_dir + relative_path;
+
+        int64_t recovered = 0;
+        int64_t skipped = 0;
+        std::string file_error;
+
+        bool success = repair_sst_file(src_file, dst_file, config, recovered, skipped, file_error);
+
+        if (success) {
+            total_recovered += recovered;
+            total_skipped += skipped;
+        } else {
+            corrupted_count++;
+            fmt::print(stdout, "  ✗ Failed: {}\n", file_error);
+            if (!config.skip_corrupted) {
+                error_msg = fmt::format("Aborted: File repair failed: {}", file_error);
+                return false;
+            }
+        }
+
+        // Progress update
+        if ((i + 1) % 10 == 0 || i == sst_files.size() - 1) {
+            fmt::print(stdout, "  Progress: {}/{}\n", i + 1, sst_files.size());
+        }
+    }
+
+    stats.recovered_records = total_recovered;
+    stats.skipped_records = total_skipped;
+    stats.corrupted_sst_files = corrupted_count;
+
+    fmt::print(stdout, "\nSST repair completed: {} recovered, {} skipped\n",
+               total_recovered, total_skipped);
+
+    return true;
+}
+
 // Main command function
 bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     RepairConfig config;
@@ -539,6 +707,46 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
                    error_msg);
     }
 
-    fmt::print(stdout, "SUCCESS: All checks passed!\n");
+    // Step 6: Check dry_run
+    if (config.dry_run) {
+        fmt::print(stdout, "\n=== DRY RUN MODE - No actual repair performed ===\n");
+        fmt::print(stdout, "Found {} SST files\n", sst_files.size());
+        if (config.create_backup) {
+            cleanup_backup(config.backup_dir);
+        }
+        return true;
+    }
+
+    // Step 7: Repair SST files
+    RepairStats stats;
+    stats.total_sst_files = sst_files.size();
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    if (!repair_all_sst_files(sst_files, config.output_dir, config, stats, error_msg)) {
+        fmt::print(stderr, "Error: {}\n", error_msg);
+        if (config.create_backup) {
+            rollback_to_backup(config.backup_dir, config.output_dir, error_msg);
+        }
+        if (config.create_backup) {
+            cleanup_backup(config.backup_dir);
+        }
+        return false;
+    }
+
+    auto end_time = std::chrono::steady_clock::now();
+    stats.duration_seconds = std::chrono::duration<double>(end_time - start_time).count();
+
+    fmt::print(stdout, "\nSST files repaired in {:.2f} seconds\n", stats.duration_seconds);
+    fmt::print(stdout, "Total files: {}, Recovered records: {}, Skipped records: {}\n",
+               stats.total_sst_files, stats.recovered_records, stats.skipped_records);
+    fmt::print(stdout, "Corrupted files: {}\n", stats.corrupted_sst_files);
+
+    // Step 8: Cleanup backup on success
+    if (config.create_backup) {
+        cleanup_backup(config.backup_dir);
+    }
+
+    fmt::print(stdout, "SUCCESS: Replica repair completed!\n");
     return true;
 }
