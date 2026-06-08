@@ -229,6 +229,55 @@ bool validate_directories(const RepairConfig& config, std::string& error_msg) {
     return true;
 }
 
+// Add after validate_directories:
+bool create_backup(const std::string& replica_dir, const std::string& backup_dir, std::string& error_msg) {
+    fmt::print(stdout, "Creating backup: {} -> {}\n", replica_dir, backup_dir);
+
+    // Check if backup directory already exists
+    if (dsn::utils::filesystem::directory_exists(backup_dir)) {
+        error_msg = fmt::format("Backup directory already exists: {}", backup_dir);
+        return false;
+    }
+
+    // Create backup directory
+    if (!dsn::utils::filesystem::create_directory(backup_dir)) {
+        error_msg = fmt::format("Failed to create backup directory: {}", backup_dir);
+        return false;
+    }
+
+    // Use system copy command (recursive, preserving attributes)
+    std::string cmd = fmt::format("cp -r \"{}\" \"{}\"", replica_dir, backup_dir);
+    int ret = system(cmd.c_str());
+
+    if (ret != 0) {
+        error_msg = fmt::format("Backup command failed with code: {}", ret);
+        // Cleanup partial backup
+        dsn::utils::filesystem::remove_path(backup_dir);
+        return false;
+    }
+
+    fmt::print(stdout, "Backup created successfully\n");
+    return true;
+}
+
+bool verify_backup(const std::string& backup_dir, std::string& error_msg) {
+    // Check if backup has expected structure
+    // The backup should contain the replica directory with rdb subdirectory
+    // Since we copy the entire replica directory, we need to check for rdb inside
+    auto rdb_dir = dsn::utils::filesystem::path_combine(
+        backup_dir,
+        "rdb"  // 注意：使用"rdb"而不是"rdb/data"，基于任务4的修正
+    );
+
+    if (!dsn::utils::filesystem::directory_exists(rdb_dir)) {
+        error_msg = fmt::format("Backup verification failed: rdb directory missing in {}", backup_dir);
+        return false;
+    }
+
+    fmt::print(stdout, "Backup verified successfully\n");
+    return true;
+}
+
 // Main command function
 bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     RepairConfig config;
@@ -261,6 +310,23 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     }
 
     fmt::print(stdout, "Directory validation passed\n");
+
+    // Step 0: Create backup
+    if (config.create_backup) {
+        if (!create_backup(config.replica_dir, config.backup_dir, error_msg)) {
+            fmt::print(stderr, "Error: {}\n", error_msg);
+            return false;
+        }
+
+        if (!verify_backup(config.backup_dir, error_msg)) {
+            fmt::print(stderr, "Error: {}\n", error_msg);
+            // Cleanup failed backup
+            dsn::utils::filesystem::remove_path(config.backup_dir);
+            return false;
+        }
+    } else {
+        fmt::print(stdout, "WARNING: Backup creation is disabled (NOT recommended)\n");
+    }
 
     return true;
 }
