@@ -64,6 +64,28 @@ repair_replica 1.2 /path/to/corrupted/replica /path/to/output --skip_corrupted_r
 7. **Verification**: Verify database consistency (optional)
 8. **Reporting**: Generate JSON report (optional)
 
+## Directory Structure
+
+The replica directory must follow this structure:
+
+```
+replica_dir/
+├── data/
+│   └── rdb/              # RocksDB database files (SST, CURRENT, MANIFEST, etc.)
+├── .init-info            # Replica initialization metadata
+└── .app-info             # Application metadata
+```
+
+The repaired output will follow the same structure:
+
+```
+output_dir/
+├── data/
+│   └── rdb/              # Repaired RocksDB database
+├── .init-info            # Copied from original replica
+└── .app-info             # Copied from original replica
+```
+
 ## Safety Features
 
 - **Automatic Backup**: Creates backup before any modifications
