@@ -624,12 +624,21 @@ bool create_new_database(const std::string& output_dir,
                        std::string& error_msg) {
     fmt::print(stdout, "Creating new RocksDB database...\n");
 
+    // Create directory structure
+    // First create the data subdirectory if it doesn't exist
+    auto data_dir = dsn::utils::filesystem::path_combine(output_dir, "data");
+    if (!dsn::utils::filesystem::directory_exists(data_dir)) {
+        if (!dsn::utils::filesystem::create_directory(data_dir)) {
+            error_msg = fmt::format("Failed to create directory: {}", data_dir);
+            return false;
+        }
+    }
+
     auto rdb_dir = dsn::utils::filesystem::path_combine(
         output_dir,
-        "data/rdb"  // 注意：使用"data/rdb"路径
+        "data/rdb"  // 正确的路径结构: output_dir/data/rdb
     );
 
-    // Create directory structure
     if (!dsn::utils::filesystem::directory_exists(rdb_dir)) {
         if (!dsn::utils::filesystem::create_directory(rdb_dir)) {
             error_msg = fmt::format("Failed to create directory: {}", rdb_dir);
