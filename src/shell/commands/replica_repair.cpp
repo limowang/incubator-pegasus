@@ -356,6 +356,40 @@ dsn::error_code generate_default_metadata(const RepairConfig& config,
     return dsn::ERR_OK;
 }
 
+// Add after generate_default_metadata, using local_partition_split pattern:
+bool discover_sst_files(const std::string& replica_dir,
+                       std::vector<std::string>& sst_files,
+                       std::string& error_msg) {
+    auto rdb_dir = dsn::utils::filesystem::path_combine(
+        replica_dir,
+        "rdb"  // 注意：使用"rdb"而不是"rdb/data"，基于任务4的修正
+    );
+
+    // Get all subdirectories (should be numbered like 000001, 000002, etc.)
+    std::vector<std::string> subdirs;
+    if (!dsn::utils::filesystem::get_subdirectories(rdb_dir, subdirs, false)) {
+        error_msg = fmt::format("Failed to list subdirectories in {}", rdb_dir);
+        return false;
+    }
+
+    // Collect all .sst files
+    for (const auto& subdir : subdirs) {
+        std::vector<std::string> files;
+        if (!dsn::utils::filesystem::get_subfiles(subdir, files, false)) {
+            continue;
+        }
+
+        for (const auto& file : files) {
+            if (file.size() >= 4 && file.substr(file.size() - 4) == ".sst") {
+                sst_files.push_back(file);
+            }
+        }
+    }
+
+    fmt::print(stdout, "Found {} SST files\n", sst_files.size());
+    return true;
+}
+
 // Main command function
 bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     RepairConfig config;
@@ -418,5 +452,26 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     fmt::print(stdout, "App ID: {}, App Name: {}, Partition Count: {}\n",
                app_info.app_id, app_info.app_name, app_info.partition_count);
 
+    // Step 4: Discover SST files
+    std::vector<std::string> sst_files;
+    if (!discover_sst_files(config.replica_dir, sst_files, error_msg)) {
+        fmt::print(stderr, "Error: {}\n", error_msg);
+        if (config.create_backup) {
+            cleanup_backup(config.backup_dir);
+        }
+        return false;
+    }
+
+    if (sst_files.empty()) {
+        fmt::print(stderr, "Error: No SST files found in replica directory\n");
+        if (config.create_backup) {
+            cleanup_backup(config.backup_dir);
+        }
+        return false;
+    }
+
+    fmt::print(stdout, "SST file discovery completed\n");
+
+    fmt::print(stdout, "SUCCESS: All checks passed!\n");
     return true;
 }
