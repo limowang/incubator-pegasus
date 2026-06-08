@@ -45,6 +45,14 @@ const std::string repair_replica_help =
     "[--report_file path] [--dry_run] [--skip_corrupted_records] "
     "[--max_corrupted_ratio ratio] [--verify_repair] [--help]";
 
+const std::string repair_replica_examples =
+    "Examples:\n"
+    "  repair_replica 1.2 /path/to/replica /path/to/output\n"
+    "  repair_replica 1.2 /path/to/replica /path/to/output --dry_run\n"
+    "  repair_replica 1.2 /path/to/replica /path/to/output --backup_dir /custom/backup\n"
+    "  repair_replica 1.2 /path/to/replica /path/to/output --max_corrupted_ratio 0.3\n"
+    "  repair_replica 1.2 /path/to/replica /path/to/output --report_file report.json";
+
 // Basic data structures
 struct RepairConfig {
     int32_t app_id = 0;
@@ -94,6 +102,16 @@ bool parse_arguments(arguments args, RepairConfig& config, std::string& error_ms
         return false;
     }
 
+    // Validate GPID numerical ranges
+    if (config.app_id <= 0) {
+        error_msg = fmt::format("Invalid app_id: {}. app_id must be greater than 0\n", config.app_id);
+        return false;
+    }
+    if (config.partition_id < 0) {
+        error_msg = fmt::format("Invalid partition_id: {}. partition_id must be >= 0\n", config.partition_id);
+        return false;
+    }
+
     config.replica_dir = args.argv[2];
     config.output_dir = args.argv[3];
 
@@ -111,6 +129,10 @@ bool parse_arguments(arguments args, RepairConfig& config, std::string& error_ms
             fmt::print(stdout, "  --skip_corrupted_records Skip corrupted records and continue\n");
             fmt::print(stdout, "  --max_corrupted_ratio    Maximum corrupted file ratio (0.0-1.0, default: 0.5)\n");
             fmt::print(stdout, "  --verify_repair           Verify repaired replica (default: true)\n");
+            fmt::print(stdout, "\nExamples:\n");
+            fmt::print(stdout, "  repair_replica 1.2 /path/to/replica /path/to/output\n");
+            fmt::print(stdout, "  repair_replica 1.2 /path/to/replica /path/to/output --dry_run\n");
+            fmt::print(stdout, "  repair_replica 1.2 /path/to/replica /path/to/output --max_corrupted_ratio 0.3\n");
             return false;
         }
 
