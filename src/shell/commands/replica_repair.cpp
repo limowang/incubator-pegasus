@@ -712,25 +712,41 @@ bool import_repaired_sst_files(const std::string& output_dir,
 
 // Add after import_repaired_sst_files:
 dsn::error_code write_metadata_files(const std::string& output_dir,
+                                     const std::string& replica_dir,
                                      const dsn::app_info& app_info,
                                      const dsn::replication::replica_init_info& init_info,
                                      uint64_t last_decree,
                                      std::string& error_msg) {
+    dsn::error_code err;
     fmt::print(stdout, "Generating metadata files...\n");
 
-    // Generate .app-info file
-    dsn::app_info new_ai(app_info);
-    dsn::replication::replica_app_info rai(&new_ai);
-    const auto rai_path = dsn::utils::filesystem::path_combine(
+    // Copy .app-info file directly from replica directory
+    const auto app_info_src = dsn::utils::filesystem::path_combine(
+        replica_dir, dsn::replication::replica_app_info::kAppInfo);
+    const auto app_info_dst = dsn::utils::filesystem::path_combine(
         output_dir, dsn::replication::replica_app_info::kAppInfo);
 
-    auto err = rai.store(rai_path);
-    if (err != dsn::ERR_OK) {
-        error_msg = fmt::format("Failed to write app-info to {}", rai_path);
-        return err;
+    // Check if source file exists
+    if (!dsn::utils::filesystem::file_exists(app_info_src)) {
+        fmt::print(stdout, "  ⚠ .app-info not found in source, will use generated version\n");
+        // Fallback: generate .app-info file
+        dsn::app_info new_ai(app_info);
+        dsn::replication::replica_app_info rai(&new_ai);
+        err = rai.store(app_info_dst);
+        if (err != dsn::ERR_OK) {
+            error_msg = fmt::format("Failed to write app-info to {}", app_info_dst);
+            return err;
+        }
+    } else {
+        // Copy file directly
+        rocksdb::Status status = dsn::utils::copy_file(app_info_src, app_info_dst);
+        if (!status.ok()) {
+            error_msg = fmt::format("Failed to copy app-info from {} to {}: {}",
+                                app_info_src, app_info_dst, status.ToString());
+            return dsn::ERR_FILE_OPERATION_FAILED;
+        }
+        fmt::print(stdout, "  ✓ Copied .app-info\n");
     }
-
-    fmt::print(stdout, "  ✓ Generated .app-info\n");
 
     // Generate .init-info file
     dsn::replication::replica_init_info new_rii(init_info);
@@ -963,7 +979,7 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     release_db(&new_cf_hdls, &new_db);
 
     // Step 10: Write metadata files
-    if (!write_metadata_files(config.output_dir, app_info, init_info,
+    if (!write_metadata_files(config.output_dir, config.replica_dir, app_info, init_info,
                              last_committed_decree, error_msg)) {
         fmt::print(stderr, "Error: {}\n", error_msg);
         if (config.create_backup) {
