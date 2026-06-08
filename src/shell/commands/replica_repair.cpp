@@ -190,6 +190,45 @@ bool parse_arguments(arguments args, RepairConfig& config, std::string& error_ms
     return true;
 }
 
+// Add after parse_arguments:
+bool validate_directories(const RepairConfig& config, std::string& error_msg) {
+    // Check if replica directory exists
+    if (!dsn::utils::filesystem::directory_exists(config.replica_dir)) {
+        error_msg = fmt::format("Replica directory does not exist: {}", config.replica_dir);
+        return false;
+    }
+
+    // Check if replica directory has the expected structure
+    auto rdb_dir = dsn::utils::filesystem::path_combine(
+        config.replica_dir,
+        "rdb"
+    );
+
+    if (!dsn::utils::filesystem::directory_exists(rdb_dir)) {
+        error_msg = fmt::format("Replica directory does not contain rdb subdirectory: {}",
+                               config.replica_dir);
+        return false;
+    }
+
+    // Check if output directory's parent exists (we'll create the output dir itself)
+    std::string output_parent = dsn::utils::filesystem::remove_file_name(config.output_dir);
+    if (!dsn::utils::filesystem::directory_exists(output_parent)) {
+        error_msg = fmt::format("Output directory parent does not exist: {}", output_parent);
+        return false;
+    }
+
+    // Check if backup directory's parent exists (if backup is enabled)
+    if (config.create_backup && !config.backup_dir.empty()) {
+        std::string backup_parent = dsn::utils::filesystem::remove_file_name(config.backup_dir);
+        if (!dsn::utils::filesystem::directory_exists(backup_parent)) {
+            error_msg = fmt::format("Backup directory parent does not exist: {}", backup_parent);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 // Main command function
 bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     RepairConfig config;
@@ -213,6 +252,15 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     fmt::print(stdout, "  Dry Run: {}\n", config.dry_run ? "yes" : "no");
     fmt::print(stdout, "  Skip Corrupted: {}\n", config.skip_corrupted ? "yes" : "no");
     fmt::print(stdout, "  Max Corrupted Ratio: {}\n", config.max_corrupted_ratio);
+
+    // Validate directories
+    fmt::print(stdout, "Starting directory validation...\n");
+    if (!validate_directories(config, error_msg)) {
+        fmt::print(stderr, "Error: {}\n", error_msg);
+        return false;
+    }
+
+    fmt::print(stdout, "Directory validation passed\n");
 
     return true;
 }
