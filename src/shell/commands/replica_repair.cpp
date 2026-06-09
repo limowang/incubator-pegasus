@@ -257,8 +257,9 @@ bool create_backup(const std::string& replica_dir, const std::string& backup_dir
         return false;
     }
 
-    // Use system copy command (recursive, preserving attributes)
-    std::string cmd = fmt::format("cp -r \"{}\" \"{}\"", replica_dir, backup_dir);
+    // Use system copy command to copy contents of replica_dir into backup_dir
+    // Using "replica_dir/." ensures we copy the contents, not the directory itself
+    std::string cmd = fmt::format("cp -r \"{}/.\" \"{}\"", replica_dir, backup_dir);
     int ret = system(cmd.c_str());
 
     if (ret != 0) {
@@ -274,11 +275,11 @@ bool create_backup(const std::string& replica_dir, const std::string& backup_dir
 
 bool verify_backup(const std::string& backup_dir, std::string& error_msg) {
     // Check if backup has expected structure
-    // The backup should contain the replica directory with rdb subdirectory
-    // Since we copy the entire replica directory, we need to check for rdb inside
+    // Since we copy the contents of replica_dir into backup_dir (using cp -r replica_dir/. backup_dir),
+    // we expect to find data/rdb directly in backup_dir
     auto rdb_dir = dsn::utils::filesystem::path_combine(
         backup_dir,
-        "data/rdb"  // 正确的路径结构: replica_dir/data/rdb
+        "data/rdb"
     );
 
     if (!dsn::utils::filesystem::directory_exists(rdb_dir)) {
@@ -373,26 +374,38 @@ bool discover_sst_files(const std::string& replica_dir,
                        std::string& error_msg) {
     auto rdb_dir = dsn::utils::filesystem::path_combine(
         replica_dir,
-        "data/rdb"  // 正确的路径结构: replica_dir/data/rdb
+        "data/rdb"
     );
 
-    // Get all subdirectories (should be numbered like 000001, 000002, etc.)
-    std::vector<std::string> subdirs;
-    if (!dsn::utils::filesystem::get_subdirectories(rdb_dir, subdirs, false)) {
-        error_msg = fmt::format("Failed to list subdirectories in {}", rdb_dir);
-        return false;
-    }
-
-    // Collect all .sst files
-    for (const auto& subdir : subdirs) {
-        std::vector<std::string> files;
-        if (!dsn::utils::filesystem::get_subfiles(subdir, files, false)) {
-            continue;
-        }
-
-        for (const auto& file : files) {
+    // First, try to find SST files directly in rdb directory (single column family or old format)
+    std::vector<std::string> files_in_rdb;
+    if (dsn::utils::filesystem::get_subfiles(rdb_dir, files_in_rdb, false)) {
+        for (const auto& file : files_in_rdb) {
             if (file.size() >= 4 && file.substr(file.size() - 4) == ".sst") {
                 sst_files.push_back(file);
+            }
+        }
+    }
+
+    // If no files found in rdb directly, search in subdirectories (multi column family structure)
+    // Subdirectories are typically named like 000001, 000002, etc. for different column families
+    if (sst_files.empty()) {
+        std::vector<std::string> subdirs;
+        if (!dsn::utils::filesystem::get_subdirectories(rdb_dir, subdirs, false)) {
+            error_msg = fmt::format("Failed to list subdirectories in {}", rdb_dir);
+            return false;
+        }
+
+        for (const auto& subdir : subdirs) {
+            std::vector<std::string> files;
+            if (!dsn::utils::filesystem::get_subfiles(subdir, files, false)) {
+                continue;
+            }
+
+            for (const auto& file : files) {
+                if (file.size() >= 4 && file.substr(file.size() - 4) == ".sst") {
+                    sst_files.push_back(file);
+                }
             }
         }
     }
@@ -578,9 +591,10 @@ bool repair_all_sst_files(const std::vector<std::string>& sst_files,
     for (size_t i = 0; i < sst_files.size(); i++) {
         const auto& src_file = sst_files[i];
 
-        // Generate destination path (preserve structure)
+        // Generate destination path in repair_temp subdirectory
+        // This avoids conflict with the database that will be created later
         std::string relative_path = src_file.substr(config.replica_dir.size());
-        std::string dst_file = output_dir + relative_path;
+        std::string dst_file = output_dir + "/repair_temp" + relative_path;
 
         int64_t recovered = 0;
         int64_t skipped = 0;
@@ -670,29 +684,43 @@ bool import_repaired_sst_files(const std::string& output_dir,
                                std::string& error_msg) {
     fmt::print(stdout, "Importing repaired SST files...\n");
 
-    auto rdb_dir = dsn::utils::filesystem::path_combine(
+    // Look for repaired files in repair_temp subdirectory
+    auto repair_temp_dir = dsn::utils::filesystem::path_combine(
         output_dir,
-        "data/rdb"  // 注意：使用"data/rdb"而不是"rdb"
+        "repair_temp/data/rdb"
     );
 
     // Collect repaired SST files
     std::vector<std::string> repaired_sst_files;
-    std::vector<std::string> subdirs;
 
-    if (!dsn::utils::filesystem::get_subdirectories(rdb_dir, subdirs, false)) {
-        error_msg = "Failed to list subdirectories in output directory";
-        return false;
-    }
-
-    for (const auto& subdir : subdirs) {
-        std::vector<std::string> files;
-        if (!dsn::utils::filesystem::get_subfiles(subdir, files, false)) {
-            continue;
-        }
-
-        for (const auto& file : files) {
+    // First, try to find SST files directly in repair_temp/rdb directory (single column family)
+    std::vector<std::string> files_in_rdb;
+    if (dsn::utils::filesystem::get_subfiles(repair_temp_dir, files_in_rdb, false)) {
+        for (const auto& file : files_in_rdb) {
             if (file.size() >= 4 && file.substr(file.size() - 4) == ".sst") {
                 repaired_sst_files.push_back(file);
+            }
+        }
+    }
+
+    // If no files found directly, search in subdirectories (multi column family structure)
+    if (repaired_sst_files.empty()) {
+        std::vector<std::string> subdirs;
+        if (!dsn::utils::filesystem::get_subdirectories(repair_temp_dir, subdirs, false)) {
+            error_msg = "Failed to list subdirectories in repair_temp directory";
+            return false;
+        }
+
+        for (const auto& subdir : subdirs) {
+            std::vector<std::string> files;
+            if (!dsn::utils::filesystem::get_subfiles(subdir, files, false)) {
+                continue;
+            }
+
+            for (const auto& file : files) {
+                if (file.size() >= 4 && file.substr(file.size() - 4) == ".sst") {
+                    repaired_sst_files.push_back(file);
+                }
             }
         }
     }
@@ -988,8 +1016,8 @@ bool repair_replica(command_executor *e, shell_context *sc, arguments args) {
     release_db(&new_cf_hdls, &new_db);
 
     // Step 10: Write metadata files
-    if (!write_metadata_files(config.output_dir, config.replica_dir, app_info, init_info,
-                             last_committed_decree, error_msg)) {
+    if (write_metadata_files(config.output_dir, config.replica_dir, app_info, init_info,
+                             last_committed_decree, error_msg) != dsn::ERR_OK) {
         fmt::print(stderr, "Error: {}\n", error_msg);
         if (config.create_backup) {
             rollback_to_backup(config.backup_dir, config.output_dir, error_msg);
